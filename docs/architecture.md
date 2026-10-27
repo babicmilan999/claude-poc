@@ -1,31 +1,39 @@
-# Ops Copilot — Architecture
+# Payments Support AI — Architecture
 
-An AI copilot for operations/support agents. When a customer complaint arrives
-("my card was declined", "my rent payment never went out", "my direct debit
-failed"), the copilot automatically investigates the customer's banking data,
-explains the root cause with evidence, and recommends the next action. By the
-time an ops agent opens the case, the diagnosis is waiting for their review.
+Two AI agents on one shared platform, covering a payments-support journey end to end:
+
+1. **In-app customer assistant.** A customer asks a question in the app ("why was my card declined?", "my rent didn't go out", "the gym says my direct debit failed"). The assistant categorises the question, answers it from the knowledge base and the customer's own data, and resolves it without a human where it can. When it can't, it **hands off** to the ops team as an already-categorised case with the transcript and evidence attached.
+2. **Ops copilot.** Every new case, whether handed off by the assistant or arriving from another source (email, phone, an ops agent), is investigated automatically. The copilot explains the root cause with evidence and recommends the next action; an ops agent reviews every diagnosis.
 
 ## Goals
 
+**Customer assistant**
+- Resolve common payment and card questions without a human, measured as the **containment rate**.
+- Hand off at the right moments (low confidence, sensitive topics, the customer asks, repeated failure) and never hold on to a case it should not.
+- Answers grounded in the knowledge base and the customer's own data; no invented facts, no financial advice, read-only.
+
+**Ops copilot**
 - Diagnose the common issue types: **card declines**, **missed scheduled payments**, **failed direct debits**, with a fallback for anything else.
 - **Investigate automatically** as soon as a case arrives, so the ops agent starts from a diagnosis instead of from scratch.
-- Every diagnosis is grounded in tool evidence (no evidence → no conclusion).
-- Measure diagnosis accuracy against a labelled dataset and track it over time.
-- Human in the loop: the copilot proposes, the ops agent accepts, corrects or rejects.
-- **Simulate complaints** on demand, so the system can be demoed and tested with realistic, fresh cases.
+- Every diagnosis is grounded in tool evidence (no evidence → no conclusion); a human reviews every diagnosis.
+
+**Platform**
+- One shared core (triage, banking tools, LLM access, tracing, guardrails) used by both agents.
+- **Simulated customers** that chat with the assistant like real ones, so the whole journey can be demoed and measured with fresh, realistic incidents.
+- Accuracy and outcome metrics for both agents, tracked over time.
 - **Local-first:** the whole system runs on a laptop with `docker compose up`. The only cost is LLM tokens, and switching to a local model makes it free.
 
 ## Tech stack
 
 | Concern | Choice |
 |---|---|
-| Agent runtime | Python 3.12, FastAPI, LangGraph |
+| Agent runtime | Python 3.12, FastAPI, LangGraph (two graphs: `assistant`, `investigation`) |
 | LLM access | LiteLLM proxy → Anthropic API (Claude), or Ollama for a free local model |
+| Knowledge base search | PostgreSQL + pgvector; embeddings with a small local model (fastembed, in-process) |
 | Observability & evals | Langfuse, self-hosted in Docker (traces, scores, datasets) |
 | Banking domain service (mock core banking) | Java 21, Spring Boot 3 |
-| Persistence | PostgreSQL (domain data, cases, investigations, job queue, LangGraph checkpoints) |
-| Ops console | Angular |
+| Persistence | PostgreSQL (domain data, conversations, cases, investigations, job queue, LangGraph checkpoints, knowledge base) |
+| Front-ends | Angular workspace with two apps: `customer-app` and `ops-console` |
 | Runtime | Docker Compose (primary); AWS via Terraform as an optional later step |
 | CI/CD | GitHub Actions (tests, offline eval gate, image build) |
 
@@ -34,7 +42,8 @@ time an ops agent opens the case, the diagnosis is waiting for their review.
 | Component | Cost |
 |---|---|
 | Everything in Docker Compose (services, Postgres, Langfuse, LiteLLM, Ollama) | Free |
-| Anthropic API | Pay per token; a POC investigation is roughly cents |
+| Embeddings for the knowledge base | Free (local model, in-process) |
+| Anthropic API | Pay per token; a POC conversation or investigation is roughly cents |
 | GitHub Actions | Free for public repos; monthly free minutes for private repos |
 | AWS (optional, later) | Hourly charges for Fargate, RDS, load balancer, plus Bedrock tokens |
 
@@ -44,22 +53,26 @@ time an ops agent opens the case, the diagnosis is waiting for their review.
 
 ```mermaid
 flowchart LR
+    customer(["Customer"])
     ops(["Ops agent"])
+    capp["Customer App<br/>Angular, chat"]
     console["Ops Console<br/>Angular"]
-    copilot["Copilot Service<br/>FastAPI + LangGraph"]
+    agents["Agent Service<br/>FastAPI + LangGraph<br/>assistant + ops copilot"]
     banking["Banking Data Service<br/>Spring Boot, Java 21"]
     litellm["LLM Gateway<br/>LiteLLM"]
     anthropic[("Anthropic API<br/>Claude")]
     ollama[("Ollama<br/>local model, free")]
     langfuse["Langfuse<br/>self-hosted"]
 
-    ops -->|"works the case queue,<br/>simulates complaints,<br/>reviews diagnoses"| console
-    console -->|"REST + SSE stream"| copilot
-    copilot -->|"read-only tool calls,<br/>simulate incident"| banking
-    copilot -->|"OpenAI-compatible API"| litellm
+    customer -->|"asks questions"| capp
+    ops -->|"works the case queue,<br/>simulates customers,<br/>reviews diagnoses"| console
+    capp -->|"chat (SSE stream)"| agents
+    console -->|"REST + SSE stream"| agents
+    agents -->|"read-only tool calls,<br/>simulate incident"| banking
+    agents -->|"OpenAI-compatible API"| litellm
     litellm -->|"default"| anthropic
     litellm -.->|"free option"| ollama
-    copilot -.->|"traces, scores"| langfuse
+    agents -.->|"traces, scores"| langfuse
     litellm -.->|"token usage, cost"| langfuse
 ```
 
@@ -67,76 +80,172 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    subgraph client["Client"]
-        console["Ops Console (Angular)"]
+    subgraph clients["Angular workspace"]
+        capp["customer-app"]
+        console["ops-console"]
     end
 
-    subgraph copilot_svc["Copilot Service (Python)"]
-        api["FastAPI<br/>/cases, /cases/simulate,<br/>/investigations, /feedback"]
+    subgraph agent_svc["Agent Service (Python)"]
+        api["FastAPI<br/>/conversations, /cases,<br/>/investigations, /simulation"]
+        assistant["Assistant graph<br/>one run per customer message"]
         workers["Investigation workers<br/>max N in parallel"]
-        graph_rt["LangGraph runtime<br/>investigation graph"]
-        tools["Tool layer<br/>typed clients for Banking API"]
+        investigation["Investigation graph"]
+        subgraph core["Shared core"]
+            triage["Triage"]
+            tools["Banking tools<br/>customer-scoped or ops-scoped"]
+            guards["Guardrails"]
+            kb["Knowledge base search"]
+        end
+        sim["Customer simulator<br/>(local profile only)"]
+        api --> assistant
         api -->|"enqueue"| jobs
         workers -->|"claim next job"| jobs
-        workers --> graph_rt --> tools
+        workers --> investigation
+        assistant --> core
+        investigation --> core
+        sim -->|"chats via the same API"| api
     end
 
     subgraph banking_svc["Banking Data Service (Java 21 / Spring Boot)"]
         bapi["REST API<br/>customers, accounts, cards,<br/>authorisations, payments, direct debits"]
-        sim["Simulation API<br/>creates a fresh incident<br/>(local profile only)"]
+        bsim["Simulation module<br/>creates incidents via domain rules<br/>(simulation profile only)"]
         rules["Decline-reason and<br/>payment-failure rules"]
         bapi --> rules
-        sim --> rules
+        bsim --> rules
     end
 
     subgraph data["PostgreSQL"]
         bankdb[("banking schema<br/>seeded mock data")]
-        copdb[("copilot schema<br/>cases, investigations,<br/>events, reviews")]
+        appdb[("agents schema<br/>conversations, cases,<br/>investigations, events")]
         jobs[("investigation queue<br/>rows with status = queued")]
+        kbdb[("knowledge base<br/>pgvector chunks")]
         ckpt[("langgraph schema<br/>checkpoints")]
     end
 
-    litellm["LiteLLM proxy<br/>routing, retries, fallbacks"]
-    anthropic[("Anthropic API")]
-    ollama[("Ollama")]
+    litellm["LiteLLM proxy"]
     langfuse["Langfuse"]
 
+    capp --> api
     console --> api
-    api --> sim
     tools --> bapi
+    sim --> bsim
     bapi --> bankdb
-    sim --> bankdb
-    api --> copdb
-    graph_rt --> ckpt
-    graph_rt --> litellm
-    litellm --> anthropic
-    litellm -.-> ollama
-    graph_rt -.-> langfuse
+    bsim --> bankdb
+    api --> appdb
+    kb --> kbdb
+    assistant --> ckpt
+    investigation --> ckpt
+    assistant --> litellm
+    investigation --> litellm
+    agent_svc -.-> langfuse
 ```
 
-**Model routing via LiteLLM.** The copilot only ever asks for two model aliases; the LiteLLM config maps them to real models, so switching provider is a config change, not a code change.
+**Model routing via LiteLLM.** Both agents only ever ask for model aliases; the LiteLLM config maps them to real models, so switching provider is a config change, not a code change.
 
 | Alias | Used for | Default (Anthropic API) | Free profile (Ollama) |
 |---|---|---|---|
-| `copilot-fast` | triage, summaries | small Claude model (Haiku) | small local model, e.g. Llama 3.1 8B |
-| `copilot-reasoning` | investigation loop, diagnosis | larger Claude model (Sonnet) | larger local model with tool calling, e.g. Qwen 2.5 14B |
+| `fast` | triage, guardrail checks, summaries, simulated customers | small Claude model (Haiku) | small local model, e.g. Llama 3.1 8B |
+| `reasoning` | assistant answers, investigation loop, diagnosis | larger Claude model (Sonnet) | larger local model with tool calling, e.g. Qwen 2.5 14B |
 
-The profile is chosen with an environment variable (for example `LLM_PROFILE=anthropic` or `LLM_PROFILE=ollama`). Expect lower diagnosis accuracy from small local models; they are good enough for building and testing the flow, and the eval loop (section 8) shows the difference in numbers.
+The profile is chosen with an environment variable (`LLM_PROFILE=anthropic` or `LLM_PROFILE=ollama`). Small local models give lower accuracy; the eval loop (section 10) shows the difference in numbers.
 
-## 3. Cases and automatic investigation
+## 3. Shared platform
 
-A **case** is a customer complaint waiting for an ops agent. An **investigation**
-is one run of the copilot on a case. Every new case is investigated
-automatically; the ops agent can re-run it (for example after rejecting a
-diagnosis), which creates a new investigation on the same case.
+Both agents are LangGraph graphs in the same Python codebase and share one core:
+
+| Component | Used by the assistant | Used by the ops copilot |
+|---|---|---|
+| **Triage** (categorise into `card_decline`, `missed_payment`, `failed_direct_debit`, `other`) | Categorises every customer question | Verifies the category on handed-off cases; full triage for cases from other sources |
+| **Signal snapshot** (recent declines, failed payments, failed DD collections, account status; plain API calls, no LLM) | Grounds triage and answers | Grounds triage |
+| **Banking tools** | Customer-scoped subset | Full read-only set |
+| **Knowledge base search** | Yes | Optional (policy lookups) |
+| **Guardrails** | Input and output checks | Evidence-grounding check |
+| **LLM access, tracing** | LiteLLM aliases, Langfuse | Same |
+
+**Tool scoping.** Tools are plain Python functions with typed inputs. The **customer-scoped** versions never take a `customer_id` from the LLM: the server injects it from the logged-in session, so the assistant cannot read another customer's data however it is prompted. They also return customer-safe fields only (for example a decline reason such as "card frozen", but never fraud-rule details or internal codes). The **ops-scoped** versions return the full records.
+
+Triage itself is one short `fast` call with structured output (category, confidence, optional secondary category, one-line reasoning), grounded by the signal snapshot. Below a confidence threshold it returns `other`.
+
+## 4. In-app customer assistant
+
+### Assistant graph
+
+Each customer message runs the graph once. The conversation is a LangGraph thread (`thread_id = conversation_id`), so history and earlier evidence are kept between messages.
+
+```mermaid
+flowchart TD
+    start([customer message]) --> context["load context<br/>history, profile,<br/>signal snapshot"]
+    context --> in_guard{"input guard<br/>injection, abuse,<br/>out of scope?"}
+    in_guard -->|"unsafe / off-topic"| deflect["polite refusal<br/>or redirect"]
+    in_guard -->|ok| triage{"triage<br/>category + confidence"}
+
+    triage --> handoff_check{"handoff rules<br/>human asked? sensitive?<br/>low confidence? failed twice?"}
+    handoff_check -->|"yes"| handoff["handoff<br/>summarise, create case<br/>with category + evidence"]
+    handoff_check -->|"no"| answer_agent["answer agent<br/>knowledge base +<br/>customer-scoped tools"]
+
+    answer_agent --> out_guard{"output guard<br/>every claim backed<br/>by a source?"}
+    out_guard -->|"no, first time"| answer_agent
+    out_guard -->|"no, again"| handoff
+    out_guard -->|yes| respond["respond<br/>streamed to the app,<br/>with 'did this help?'"]
+
+    deflect --> wait([wait for next message])
+    respond --> wait
+    handoff --> told["tell the customer<br/>an agent will follow up"]
+    told --> closed([conversation: handed_off])
+```
+
+- **Answer agent.** A ReAct loop like the investigators, with a playbook per category and a small step budget (a customer is waiting). It can call `search_knowledge_base` and the customer-scoped banking tools, and must cite which source backs each statement.
+- **Resolution.** A conversation is `resolved` when the customer confirms the answer helped, or when it goes quiet after an answer and no new conversation or case about the same issue follows within 7 days. Otherwise it ends `handed_off` or `abandoned`.
+- **Streaming.** The final answer is streamed token by token to the app (unlike the ops copilot, the customer-facing answer is the main output).
+
+### Handoff rules
+
+The assistant hands off when any of these is true:
+
+| Rule | Example |
+|---|---|
+| The customer asks for a human | "Can I talk to someone?" |
+| Sensitive topic | suspected fraud, a vulnerable customer, a formal complaint, bereavement |
+| The fix needs a human action | a fraud block that only ops can lift, a refund decision |
+| Low confidence | triage confidence below threshold, or the evidence does not explain the problem |
+| Repeated failure | the output guard rejected two answers, or the customer said "that didn't help" twice |
+
+The handoff creates a case with `source = assistant_handoff`, the **category**, the **conversation transcript**, a short **summary**, and the **evidence** already gathered. The ops copilot starts from there (section 5).
+
+### Guardrails
+
+- **Input guard:** a `fast` check (plus simple rules) for prompt injection ("ignore your instructions…", requests for other customers' data), abuse, and topics outside payments and cards. Off-topic questions get a polite redirect.
+- **Scope by construction:** customer-scoped tools with a server-injected `customer_id`; read-only in v1 (no freezing cards, no payments).
+- **Output guard:** every factual statement about the customer's account must be backed by a tool result, and every policy statement by a knowledge base article; otherwise the answer is regenerated once, then handed off. It also blocks financial advice and internal details (fraud rules, risk scores, internal codes).
+- **Data handling:** card numbers and other sensitive identifiers are masked before anything is sent to the LLM or to Langfuse.
+
+### Knowledge base
+
+- Markdown articles in the repo (`knowledge-base/`), for example: why cards get declined, card controls and limits, how and when scheduled payments run, how direct debits and mandates work, fees, how to contact support.
+- At startup the agent service splits the articles into chunks, embeds them with a small local embedding model (fastembed, in-process, free) and stores them in Postgres with **pgvector**. Search combines vector similarity with keyword matching.
+- Answers cite the article they used, and the app shows it as a link.
+
+### Customer app
+
+- A phone-sized web app in the same Angular workspace as the ops console.
+- **"Log in as"** picker with the seeded customers (local development only, no real authentication).
+- A minimal account view (cards with their status, recent transactions) and the **chat**, with streamed answers, source links, and 👍 / 👎 on each answer.
+- A **watch mode** that shows a simulated customer's conversation live (section 5).
+
+## 5. Cases and automatic investigation
+
+A **case** is a problem waiting for the ops team. An **investigation** is one run of the ops copilot on a case. Every new case is investigated automatically; the ops agent can re-run it (for example after rejecting a diagnosis), which creates a new investigation on the same case.
 
 ```mermaid
 flowchart LR
-    sim_btn(["Simulate complaint<br/>button"]) --> sim_api["POST /cases/simulate"]
-    sim_api -->|"pick scenario type"| incident["Banking service<br/>creates fresh incident data"]
-    incident -->|"customer, complaint text,<br/>expected root cause"| create
-    seed(["Seeded cases<br/>on first start"]) --> create
-    form(["New case form<br/>(free-text complaint)"]) --> create
+    sim_chat(["Simulate customer<br/>button"]) --> persona["Simulated customer<br/>chats with the assistant"]
+    real_chat(["Customer in the app"]) --> assistant["In-app assistant"]
+    persona --> assistant
+    assistant -->|"resolved"| resolved_conv(["Conversation resolved<br/>no case"])
+    assistant -->|"handoff:<br/>category, transcript,<br/>evidence"| create
+
+    sim_mail(["Simulate email<br/>complaint button"]) --> create
+    other(["Email / phone /<br/>New case form"]) --> create
 
     create["Create case<br/>status: new"] --> enqueue["Enqueue investigation<br/>status: queued"]
     enqueue --> worker["Worker claims job<br/>(max N in parallel)"]
@@ -145,6 +254,8 @@ flowchart LR
     run_graph -->|"issue type not enabled<br/>for auto"| manual["Case: needs_manual<br/>agent clicks Investigate"]
     manual --> enqueue
 ```
+
+**Case sources** (`CASE.source`): `assistant_handoff`, `email`, `phone`, `ops_manual`, `simulated_email`, and later `event` for event-triggered investigations. Handed-off cases arrive with a category; the others do not. The complaint text is optional, and an event payload (`trigger_payload`) can be stored instead.
 
 ### Case lifecycle
 
@@ -165,51 +276,63 @@ stateDiagram-v2
 ### How the automatic run works
 
 - **Trigger.** Creating a case (from any source) inserts the case and a `queued` investigation in **one transaction**, then sends a Postgres `NOTIFY` to wake the workers. No separate message broker is needed for the POC.
-- **Workers.** The copilot service runs a small pool of background workers (`MAX_PARALLEL_INVESTIGATIONS`, default 3; use 1 with Ollama). Each worker claims the oldest queued job with `SELECT … FOR UPDATE SKIP LOCKED`, so two workers never take the same job, and jobs survive a restart. If a worker dies mid-run, the job is retried and LangGraph resumes from the last checkpoint.
+- **Workers.** A small pool of background workers in the agent service (`MAX_PARALLEL_INVESTIGATIONS`, default 3; use 1 with Ollama). Each worker claims the oldest queued job with `SELECT … FOR UPDATE SKIP LOCKED`, so two workers never take the same job, and jobs survive a restart. If a worker dies mid-run, the job is retried and LangGraph resumes from the last checkpoint.
 - **One active investigation per case.** Clicking Investigate while one is queued or running just opens the existing one.
-- **Which issue types run automatically.** `AUTO_INVESTIGATE_TYPES=card_decline,missed_payment,failed_direct_debit`. The graph always runs the cheap triage step first; if the issue type is not in the list, it stops there and marks the case `needs_manual`, so tokens are not spent on cases the copilot is not built for.
-- **Streaming still works.** Workers save every event (step, tool call, evidence, tokens of the final explanation) to the `investigation_event` table. When the ops agent opens a case, the console replays the saved events over SSE and then continues live if the run is still going.
-- **Later.** If volume grows, the Postgres queue can be swapped for RabbitMQ or SQS without changing the graph.
+- **Which issue types run automatically.** `AUTO_INVESTIGATE_TYPES=card_decline,missed_payment,failed_direct_debit`. Cases of other types stop after triage and are marked `needs_manual`.
+- **Later.** If volume grows, the Postgres queue can be swapped for RabbitMQ or SQS without changing the graphs.
 
-### Simulate complaint
+### Simulation
 
-The **Simulate complaint** button in the case queue creates a realistic new case end to end:
+Two buttons in the ops console (and matching `make` targets):
 
-1. The console calls `POST /cases/simulate` (optionally with a scenario type; random by default).
-2. The copilot service calls the banking service's simulation API, for example `POST /simulation/incidents {"type": "card_decline"}`.
-3. The banking service picks a customer and inserts **fresh data that causes the problem**, timestamped now: for example a frozen card plus a declined authorisation at a petrol station, or a direct debit collection that failed because the mandate was cancelled.
-4. It returns the customer, a complaint written the way a customer would say it (several phrasings per scenario), and the **expected root cause**.
-5. The copilot service creates the case with channel `simulated` and stores the expected root cause on it, **hidden from the copilot and the ops agent**.
-6. The automatic investigation starts; the case appears in the queue and fills in live.
+**Simulate customer** (the full journey)
+1. The agent service asks the banking service's simulation module for an incident of a given or random type, for example `POST /simulation/incidents {"type": "card_decline"}`.
+2. The banking service sets up the situation through its **real domain operations and rules** (for example: freeze the card, then process card payments through the normal authorisation logic, which declines them with `CARD_FROZEN`). It returns the customer, what the customer would know and say, the **expected root cause**, and the **expected outcome**: `self_serve` (the assistant should resolve it) or `needs_human` (the assistant should hand off, for example a fraud block).
+3. A **simulated customer** (a `fast` LLM with a persona: how vague, how patient, how they phrase things) opens a conversation and chats with the assistant **through the same API as the customer app**, for up to a set number of turns. It only knows what a real customer would know.
+4. The conversation ends resolved or handed off. A handoff creates a case, which is investigated automatically.
+5. Expected root cause and expected outcome are stored on the conversation and case, **hidden from both agents and the ops agent**, so every simulated journey is scored automatically (section 10).
 
-Because simulated cases carry the expected root cause, every one of them is scored automatically in Langfuse (`diagnosis_correct`), on top of the ops agent's review. The simulation API is only enabled in the local profile (`SIMULATION_ENABLED=true`) and is never part of the tools the copilot can call.
+You can watch the conversation live in the customer app's watch mode, then follow the case in the ops console.
 
-| Scenario type | Example root causes the simulator can create |
-|---|---|
-| Card decline | card frozen, insufficient funds, merchant category blocked, card expired, contactless limit, fraud rule |
-| Missed payment | insufficient funds on the run date, payee account closed, daily payment limit exceeded |
-| Failed direct debit | mandate cancelled, insufficient funds, account closed by originator |
+**Simulate email complaint** skips the assistant: it creates the incident and a case with `source = simulated_email` and no category, to exercise the ops copilot's full triage on its own.
 
-### Console screens
+**Scope of the simulation.** In a real system nothing is simulated: incidents come from real activity, and test environments would use a separate traffic generator acting as the outside world. Here the banking service is itself a stand-in for core banking and its surroundings, so its simulation module, gated behind a Spring profile (`@Profile("simulation")`) and calling only the service's own domain logic, is a deliberate POC shortcut. The customer simulator lives in the agent service behind `SIMULATION_ENABLED=true`. Neither is ever available as a tool to the agents.
 
-1. **Case queue:** open cases with customer, complaint snippet, age, issue type and status (`investigating`, `awaiting_review`, `needs_manual`, …). Buttons: **Simulate complaint** (with an optional scenario-type picker) and **New case**.
-2. **Case detail:** complaint and customer summary; the investigation timeline (live or replayed); the diagnosis with linked evidence; the review panel (accept, correct, reject with hint). Earlier investigations of the same case are listed below.
-3. **New case form:** pick a customer, write any complaint, choose a channel. For trying edge cases by hand.
+| Scenario type | Example root causes | Expected outcome |
+|---|---|---|
+| Card decline | card frozen by the customer, insufficient funds, card expired, contactless limit, merchant category blocked | `self_serve` |
+| Card decline | fraud rule triggered | `needs_human` |
+| Missed payment | insufficient funds on the run date, daily payment limit exceeded | `self_serve` |
+| Missed payment | payee account closed | `needs_human` |
+| Failed direct debit | mandate cancelled by the customer, insufficient funds | `self_serve` |
+| Failed direct debit | account closed by the originator | `needs_human` |
 
-## 4. Investigation graph (LangGraph)
+### Ops console screens
+
+1. **Case queue:** open cases with customer, source, category, age and status. Buttons: **Simulate customer**, **Simulate email complaint** (each with an optional scenario-type picker) and **New case**.
+2. **Case detail:** the case summary, and for handed-off cases the **conversation transcript** and the assistant's category and evidence; the investigation timeline (live or replayed); the diagnosis with linked evidence; the review panel (accept, correct, reject with hint). Earlier investigations of the same case are listed below.
+3. **Conversations:** a list of assistant conversations with outcome (resolved, handed off, abandoned), for spot checks.
+4. **New case form:** pick a customer, write any complaint, choose a source.
+
+## 6. Investigation graph (LangGraph)
 
 ```mermaid
 flowchart TD
-    start([START]) --> intake["intake<br/>load case + customer profile,<br/>normalise complaint"]
-    intake --> triage{"triage<br/>classify issue type"}
+    start([START]) --> intake["intake<br/>load case, customer profile,<br/>transcript if handed off"]
+    intake --> has_cat{"category<br/>provided?"}
+    has_cat -->|"yes (assistant handoff)"| verify{"verify category<br/>against signals + evidence"}
+    has_cat -->|no| triage{"triage<br/>classify issue type"}
+    verify -->|"confirmed"| route{"route by<br/>issue type"}
+    verify -->|"doubtful"| triage
+    triage --> route
 
-    triage -->|"auto run, type not enabled"| park["park<br/>case: needs_manual"]
+    route -->|"auto run, type not enabled"| park["park<br/>case: needs_manual"]
     park --> parked([END])
 
-    triage -->|card_decline| card["card decline<br/>investigator"]
-    triage -->|missed_payment| pay["missed payment<br/>investigator"]
-    triage -->|failed_direct_debit| dd["direct debit<br/>investigator"]
-    triage -->|other / unclear| generic["generic<br/>investigator"]
+    route -->|card_decline| card["card decline<br/>investigator"]
+    route -->|missed_payment| pay["missed payment<br/>investigator"]
+    route -->|failed_direct_debit| dd["direct debit<br/>investigator"]
+    route -->|other / unclear| generic["generic<br/>investigator"]
 
     card --> evidence
     pay --> evidence
@@ -228,12 +351,10 @@ flowchart TD
     finalize --> done([END])
 ```
 
-The `park` route only applies to automatic runs. When the ops agent clicks
-Investigate on a `needs_manual` case, the run is marked as manual and triage
-continues to the matching investigator (usually `generic`).
+- **Verify, don't trust.** A handed-off case already has a category and evidence from the assistant. The copilot checks that category against the signal snapshot and that evidence (no full triage call) and only falls back to triage when it does not hold up. How often it changes the category is tracked as a metric.
+- The `park` route only applies to automatic runs. When the ops agent clicks Investigate on a `needs_manual` case, the run is marked as manual and continues to the matching investigator (usually `generic`).
 
-Each investigator is a ReAct-style subgraph with a **playbook prompt** and a
-**restricted tool set** for its issue type:
+Each investigator is a ReAct-style subgraph with a **playbook prompt** and a **restricted tool set** for its issue type:
 
 ```mermaid
 flowchart LR
@@ -245,7 +366,7 @@ flowchart LR
     end
 ```
 
-| Issue type | Tools available |
+| Issue type | Tools available (ops-scoped) |
 |---|---|
 | Card decline | `get_cards`, `get_card_authorisations`, `get_account_balance`, `get_card_controls`, `get_fraud_flags` |
 | Missed payment | `get_scheduled_payments`, `get_payment_attempts`, `get_account_balance`, `get_transactions`, `get_payee` |
@@ -259,68 +380,76 @@ class InvestigationState(TypedDict):
     investigation_id: str
     case_id: str
     customer_id: str
-    complaint: str
+    complaint: str | None
+    transcript_summary: str | None                      # from an assistant handoff
     trigger: Literal["auto", "manual"]
+    provided_category: str | None                       # from an assistant handoff
     issue_type: Literal["card_decline", "missed_payment", "failed_direct_debit", "other"]
-    evidence: Annotated[list[Evidence], operator.add]   # every tool result cited
+    evidence: Annotated[list[Evidence], operator.add]   # every tool result cited, incl. the assistant's
     steps_used: int
     diagnosis: Diagnosis | None                         # root_cause, confidence, evidence_ids, action
     reviewer_feedback: str | None
 ```
 
-## 5. Investigation sequence (simulated complaint)
+## 7. End-to-end sequence (simulated customer, handed off)
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Ops as Ops agent
     participant UI as Ops Console
-    participant API as Copilot API
+    participant API as Agent API
     participant B as Banking Service
-    participant W as Worker + LangGraph
-    participant LLM as LiteLLM → Claude / Ollama
+    participant SC as Simulated customer
+    participant A as Assistant graph
+    participant W as Worker + investigation graph
     participant LF as Langfuse
 
-    Ops->>UI: Click "Simulate complaint"
-    UI->>API: POST /cases/simulate
+    Ops->>UI: Click "Simulate customer"
+    UI->>API: POST /simulation/customers
     API->>B: POST /simulation/incidents
-    B->>B: insert frozen card + declined authorisation
-    B-->>API: customer, complaint, expected root cause
-    API->>API: create case + queued investigation (one transaction), NOTIFY
-    API-->>UI: 201 case (status: new)
-    W->>API: claim next queued job (SKIP LOCKED)
-    W->>LLM: triage complaint
-    LLM-->>W: issue_type = card_decline (enabled for auto)
-    loop until evidence is sufficient or budget spent
-        W->>LLM: next step? (playbook + evidence so far)
-        LLM-->>W: tool call get_card_authorisations
-        W->>B: GET /customers/{id}/cards/{cardId}/authorisations
-        B-->>W: declined auth, reason = CARD_FROZEN
-        W->>W: save event (step, evidence)
+    B->>B: freeze card for a fraud check, decline payments via rules
+    B-->>API: customer, persona hints, expected root cause, expected outcome = needs_human
+    API->>SC: start persona
+    SC->>API: POST /conversations (as the customer)
+    loop each customer message
+        SC->>API: "my card keeps getting declined"
+        API->>A: run graph for this message
+        A->>A: input guard, triage = card_decline
+        A->>B: customer-scoped lookups
+        B-->>A: card blocked by security check
+        A->>A: handoff rule: needs a human action
     end
-    W->>LLM: diagnose (structured output) + explanation
-    LLM-->>W: root cause, confidence 0.94, action
-    W->>W: case → awaiting_review, interrupt()
-    W-)LF: trace + score vs expected root cause
+    A->>API: handoff: create case (category, transcript, evidence) + queued investigation
+    API-->>SC: "An agent will look into this and get back to you"
+    A-)LF: conversation trace, score handoff_correct = 1
+    W->>API: claim next queued job (SKIP LOCKED)
+    W->>W: verify category (confirmed), card decline investigator
+    W->>B: ops-scoped lookups (fraud flags, authorisations)
+    B-->>W: fraud rule FR-12 triggered, card blocked
+    W->>W: diagnose, case → awaiting_review, interrupt()
+    W-)LF: trace + score diagnosis vs expected root cause
     Ops->>UI: Open case from queue
     UI->>API: GET /investigations/{id}/events (SSE)
     API-->>UI: replay saved events, then live
-    Ops->>UI: Accept / correct root cause
+    Ops->>UI: Accept diagnosis
     UI->>API: POST /investigations/{id}/feedback
-    API->>W: resume thread with feedback
-    W->>W: finalize, case → resolved
-    W-)LF: score diagnosis_accepted = 1
+    API->>W: resume thread, finalize, case → resolved
 ```
 
-## 6. Streaming to the console
+## 8. Streaming to the front-ends
 
-- The console opens `GET /investigations/{id}/events` as Server-Sent Events.
-- Events are our own small set of types (`step_started`, `classified`, `tool_call`, `evidence`, `token`, `diagnosis`, `awaiting_review`, `status_changed`), mapped from LangGraph's `updates`, `messages` and `custom` stream modes.
-- Only the final plain-language explanation is streamed token by token; triage, tool calls and the structured diagnosis are sent as complete events.
-- Every event is stored with an increasing id, so a refresh or reconnect (`Last-Event-ID`) replays what was missed and then continues live.
-- The case queue receives `status_changed` events over a second SSE stream (`GET /cases/events`), so new simulated cases and status changes appear without refreshing.
+| Stream | Endpoint | What streams |
+|---|---|---|
+| **Customer chat** | `POST /conversations/{id}/messages` (response is an SSE stream) | Answer tokens, source links, handoff notice |
+| **Investigation timeline** | `GET /investigations/{id}/events` | `step_started`, `classified`, `tool_call`, `evidence`, `token` (final explanation only), `diagnosis`, `awaiting_review` |
+| **Case queue** | `GET /cases/events` (or polling) | `case_created`, `status_changed` |
 
-## 7. Data model
+- Event types are our own, mapped from LangGraph's `updates`, `messages` and `custom` stream modes.
+- Investigation events are stored with an increasing id, so a refresh or reconnect (`Last-Event-ID`) replays what was missed and continues live. Automatic runs usually finish before the case is opened; then the console simply loads the stored timeline.
+- The customer chat uses a POST, so the app reads the stream with a fetch-based SSE client rather than the browser's `EventSource`.
+
+## 9. Data model
 
 ```mermaid
 erDiagram
@@ -333,7 +462,10 @@ erDiagram
     ACCOUNT ||--o{ DD_MANDATE : authorises
     DD_MANDATE ||--o{ DD_COLLECTION : "collected via"
 
-    CUSTOMER ||--o{ CASE : "complains in"
+    CUSTOMER ||--o{ CONVERSATION : starts
+    CONVERSATION ||--o{ MESSAGE : contains
+    CONVERSATION ||--o| CASE : "hands off to"
+    CUSTOMER ||--o{ CASE : "subject of"
     CASE ||--o{ INVESTIGATION : "investigated by"
     INVESTIGATION ||--o{ INVESTIGATION_EVENT : emits
     INVESTIGATION ||--o| DIAGNOSIS : produces
@@ -401,11 +533,35 @@ erDiagram
         string type
         timestamp booked_at
     }
+    CONVERSATION {
+        uuid id PK
+        uuid customer_id
+        string status
+        string category
+        string outcome
+        int rating
+        bool simulated
+        string expected_outcome
+        string expected_root_cause
+        timestamp started_at
+        timestamp ended_at
+    }
+    MESSAGE {
+        bigint id PK
+        uuid conversation_id FK
+        string role
+        string content
+        jsonb sources
+        timestamp created_at
+    }
     CASE {
         uuid id PK
         uuid customer_id
-        string channel
+        uuid conversation_id FK
+        string source
+        string category
         string complaint
+        jsonb trigger_payload
         string status
         string expected_root_cause
         timestamp created_at
@@ -444,55 +600,66 @@ erDiagram
     }
 ```
 
-- `CASE.channel` is `chat`, `email`, `phone` or `simulated`. `expected_root_cause` is only set for simulated and seeded cases and is never shown to the copilot or the ops agent.
-- `INVESTIGATION.status` is `queued`, `running`, `awaiting_review`, `completed` or `failed`; the `queued` rows are the job queue the workers claim from.
-- `INVESTIGATION_EVENT` holds everything streamed to the console, so a case can be replayed after the fact.
+- `CONVERSATION.outcome` is `resolved`, `handed_off` or `abandoned`; `rating` comes from the 👍 / 👎 buttons.
+- `CASE.category` is set by the assistant on handoff and may be changed by the copilot; `complaint` is optional when `trigger_payload` is used.
+- `expected_outcome` and `expected_root_cause` are only set for simulated and seeded data and are never shown to either agent or the ops agent.
+- `INVESTIGATION.status` is `queued`, `running`, `awaiting_review`, `completed` or `failed`; the `queued` rows are the job queue.
+- Knowledge base chunks (`kb_chunk`: article, title, text, embedding vector) and LangGraph checkpoints live in their own tables, not shown.
 
-The banking tables live in the Spring Boot service's schema and are seeded with
-scenarios that each have one known root cause. The simulation API uses the same
-scenario definitions to create fresh incidents, and the same scenarios make up
-the evaluation dataset.
+The banking tables live in the Spring Boot service's schema and are seeded with scenarios that each have one known root cause and expected outcome. The simulation module uses the same scenario definitions to create fresh incidents, and the same scenarios make up the evaluation datasets.
 
-## 8. Evaluation loop
+## 10. Metrics and evaluation
+
+### Metrics
+
+| Metric | Agent | How it is measured |
+|---|---|---|
+| **Containment rate** | Assistant | Conversations resolved without a human ÷ all conversations |
+| **Correct handoff decisions** | Assistant | Simulated and eval conversations: handed off when `needs_human`, resolved when `self_serve` |
+| **Answer groundedness** | Assistant | LLM-as-judge: every claim backed by a cited source |
+| **Customer rating** | Assistant | 👍 / 👎 per answer |
+| **Category accuracy** | Both | Against the scenario's issue type (simulated and eval cases) |
+| **Category change rate at handoff** | Ops copilot | How often verification changed the assistant's category |
+| **Diagnosis accuracy** | Ops copilot | Matches the expected root cause, or accepted unchanged by the ops agent |
+| **Time to diagnosis** | Ops copilot | Case created → diagnosis ready, and → review |
+| **Handoffs per 100 conversations** | End to end | Proxy for support contacts reaching the ops team |
+
+All metrics are stored as Langfuse scores on the conversation or investigation traces, so they can be filtered by model profile, category and prompt version.
+
+### Evaluation loop
 
 ```mermaid
 flowchart LR
-    seed["Seeded scenarios<br/>(customer + complaint +<br/>expected root cause)"] --> ds[("Langfuse dataset")]
+    scenarios["Scenarios<br/>(incident, customer persona,<br/>expected category, root cause,<br/>expected outcome)"] --> ds[("Langfuse datasets<br/>assistant + copilot")]
     ds --> run["Eval run<br/>local: make eval<br/>CI: GitHub Actions"]
-    run --> inv_graph["Investigation graph"]
-    inv_graph --> judge["Scorers<br/>exact root-cause match,<br/>LLM-as-judge on explanation,<br/>steps + cost"]
+    run --> journeys["Simulated journeys<br/>customer → assistant →<br/>handoff → copilot"]
+    journeys --> judge["Scorers<br/>handoff decision, category,<br/>groundedness (LLM judge),<br/>root-cause match, steps + cost"]
     judge --> scores[("Langfuse scores")]
-    scores --> gate{"accuracy ≥ baseline?"}
+    scores --> gate{"metrics ≥ baseline?"}
     gate -->|yes| merge["allow merge"]
     gate -->|no| fail["fail the PR check"]
 
-    simulated["Simulated cases<br/>(scored automatically)"] -.-> scores
-    reviews["Ops reviews<br/>(accept / correct)"] -.->|"corrected cases become<br/>new dataset items"| ds
+    simulated["Simulate buttons<br/>(scored automatically)"] -.-> scores
+    reviews["Ops reviews + 👍/👎<br/>(accept / correct)"] -.->|"corrected cases become<br/>new dataset items"| ds
 ```
 
-**Headline metrics:**
-- **Diagnosis accuracy** = diagnoses whose root cause matches the expected one (simulated and eval cases) or was accepted unchanged by the ops agent ÷ all scored diagnoses.
-- **Time to diagnosis** = case created → diagnosis ready (automatic run), and case created → review (end to end).
+- The assistant and the copilot are also evaluated **separately**: the assistant on fixed conversation scripts (no simulated customer, so results are repeatable), the copilot on cases with fixed complaints.
+- The same datasets can be run against each LiteLLM profile, so Claude and the local Ollama models can be compared side by side in Langfuse.
+- In CI, the eval job starts the Compose stack and uses the Anthropic API (the key is a GitHub Actions secret). Ollama models are usually too slow for free CI runners, so the Ollama profile is evaluated locally.
 
-The same dataset can be run against each LiteLLM profile, so Claude and the
-local Ollama models can be compared side by side in Langfuse.
-
-In CI, the eval job starts the Compose stack and uses the Anthropic API (the
-key is a GitHub Actions secret). Ollama models are usually too slow and large for
-free CI runners, so the Ollama profile is evaluated locally.
-
-## 9. Local runtime (Docker Compose)
+## 11. Local runtime (Docker Compose)
 
 ```mermaid
 flowchart TB
-    browser(["Browser<br/>localhost:4200"])
+    browser(["Browser<br/>localhost:4200 / :4300"])
 
     subgraph compose["docker compose"]
         subgraph app["Application"]
-            console["ops-console<br/>Angular dev server :4200"]
-            copilot["copilot-service<br/>FastAPI + workers :8000"]
+            console["ops-console :4200"]
+            capp["customer-app :4300"]
+            agents["agent-service<br/>FastAPI + workers :8000"]
             banking["banking-service<br/>Spring Boot :8080"]
-            pg[("postgres<br/>banking, copilot,<br/>langgraph schemas")]
+            pg[("postgres + pgvector<br/>banking, agents, kb,<br/>langgraph schemas")]
         end
 
         subgraph llm["LLM gateway"]
@@ -513,14 +680,16 @@ flowchart TB
     anthropic[("Anthropic API")]
 
     browser --> console
-    console --> copilot
-    copilot --> banking
-    copilot --> pg
+    browser --> capp
+    console --> agents
+    capp --> agents
+    agents --> banking
+    agents --> pg
     banking --> pg
-    copilot --> litellm
+    agents --> litellm
     litellm --> anthropic
     litellm -.-> ollama
-    copilot -.-> lf_web
+    agents -.-> lf_web
     lf_web --> lf_pg
     lf_web --> lf_ch
     lf_worker --> lf_ch
@@ -529,16 +698,15 @@ flowchart TB
 ```
 
 - `docker compose up` starts everything except Ollama. `docker compose --profile ollama up` adds Ollama, and `LLM_PROFILE=ollama` points LiteLLM at it.
+- Postgres uses an image with the **pgvector** extension (for example `pgvector/pgvector:pg16`).
 - The only secret is `ANTHROPIC_API_KEY`, read from a git-ignored `.env` file. Not needed with the Ollama profile.
 - Self-hosted Langfuse brings its own Postgres, ClickHouse, Redis and MinIO; keep them separate from the app's Postgres so either can be reset independently.
 - On a Mac, Ollama runs much faster natively (using the GPU) than inside Docker. In that case skip the `ollama` container and point LiteLLM at `host.docker.internal:11434`.
-- The workers run inside the `copilot-service` container for the POC. They can later move to their own container (same image, different start command) to scale separately from the API.
+- The workers and the customer simulator run inside the `agent-service` container for the POC. They can later move to their own containers (same image, different start command) to scale separately from the API.
 
-## 10. Optional later: AWS deployment
+## 12. Optional later: AWS deployment
 
-Not needed for the POC. If the app is later hosted on AWS, the same container
-images move to ECS, and only the LiteLLM config changes (Anthropic API → Bedrock,
-or keep the Anthropic API).
+Not needed for the POC. If the app is later hosted on AWS, the same container images move to ECS, and only the LiteLLM config changes (Anthropic API → Bedrock, or keep the Anthropic API).
 
 ```mermaid
 flowchart TB
@@ -550,12 +718,12 @@ flowchart TB
         ecr[("ECR")]
         alb["Application Load Balancer"]
         subgraph ecs["ECS Fargate cluster"]
-            s_copilot["copilot-service"]
+            s_agents["agent-service"]
             s_banking["banking-service"]
             s_litellm["litellm-proxy"]
         end
-        rds[("RDS PostgreSQL")]
-        s3[("S3<br/>Ops Console static site")]
+        rds[("RDS PostgreSQL<br/>with pgvector")]
+        s3[("S3<br/>customer-app + ops-console<br/>static sites")]
         secrets["Secrets Manager"]
         bedrock[("Bedrock<br/>or Anthropic API")]
     end
@@ -565,12 +733,12 @@ flowchart TB
     actions -->|push images| ecr
     actions -->|"terraform apply / ECS deploy"| ecs
     ecr --> ecs
-    alb --> s_copilot
-    s_copilot --> s_banking
-    s_copilot --> s_litellm --> bedrock
-    s_copilot --> rds
+    alb --> s_agents
+    s_agents --> s_banking
+    s_agents --> s_litellm --> bedrock
+    s_agents --> rds
     s_banking --> rds
-    s_copilot -.-> langfuse
+    s_agents -.-> langfuse
     secrets -.-> ecs
 ```
 
@@ -579,15 +747,22 @@ flowchart TB
 ```
 claude-poc/
 ├── docs/architecture.md
-├── copilot-service/      # Python, FastAPI, LangGraph, workers
-├── banking-service/      # Java 21, Spring Boot (incl. simulation API)
-├── ops-console/          # Angular
+├── agent-service/        # Python, FastAPI, LangGraph
+│   ├── core/             #   triage, tools (customer + ops scope), guardrails, kb search, llm, tracing
+│   ├── assistant/        #   assistant graph + chat API
+│   ├── investigation/    #   investigation graph, workers, case API
+│   └── simulation/       #   customer simulator (local profile only)
+├── banking-service/      # Java 21, Spring Boot (incl. simulation module)
+├── frontend/             # Angular workspace
+│   ├── customer-app/
+│   └── ops-console/
+├── knowledge-base/       # Markdown help articles
 ├── infra/
 │   ├── docker-compose.yml
 │   ├── litellm/
 │   │   ├── anthropic.yaml   # default profile
 │   │   └── ollama.yaml      # free local profile
 │   └── terraform/           # optional, later
-├── .env.example          # ANTHROPIC_API_KEY, LLM_PROFILE, AUTO_INVESTIGATE_TYPES, Langfuse keys
+├── .env.example          # ANTHROPIC_API_KEY, LLM_PROFILE, AUTO_INVESTIGATE_TYPES, SIMULATION_ENABLED, Langfuse keys
 └── .github/workflows/
 ```
