@@ -766,3 +766,51 @@ claude-poc/
 ├── .env.example          # ANTHROPIC_API_KEY, LLM_PROFILE, AUTO_INVESTIGATE_TYPES, SIMULATION_ENABLED, Langfuse keys
 └── .github/workflows/
 ```
+
+---
+
+## Design Q&A
+
+Questions raised while designing, with short answers. Details are in the sections above.
+
+**Are all these technologies free to use (for example AWS Bedrock and Langfuse)?**
+Almost everything is free and open source: LangGraph, LiteLLM, FastAPI, Spring Boot, Angular, PostgreSQL, Docker, Terraform, and Langfuse when self-hosted (Langfuse Cloud also has a free tier). The paid parts are LLM tokens (Anthropic API or Bedrock, pay per token, no permanent free tier) and AWS hosting (hourly charges). That is why the design is local-first: running in Docker Compose, the only cost is tokens, and the Ollama profile removes even that.
+
+**Does all code for all apps go in the same repo, and how do we start everything?**
+Yes, one repo, with one folder per app (`agent-service`, `banking-service`, `frontend`) plus `infra/`. Each app keeps its own build tool and Dockerfile, and CI workflows run per folder. There are two ways to start: `make up` runs everything in Docker Compose (demos, evals); `make infra` runs only Postgres, LiteLLM and Langfuse in Docker while you run the app you are working on natively with hot reload. Apps read all settings from environment variables, so the same code runs both ways.
+
+**What does "Python, managed with uv (pyproject.toml)" mean?**
+`pyproject.toml` is the Python equivalent of `pom.xml` / `build.gradle`: project metadata, Python version and dependencies. `uv` is the tool that manages it, like Maven or Gradle plus SDKMAN: `uv add` adds a dependency, `uv sync` installs everything into a per-project `.venv/`, `uv.lock` pins exact versions (committed), `uv run` starts the app or tests. There is no compile step and no jar.
+
+**How is LangGraph used, and is it really needed?**
+Each agent's flow is a graph: nodes are Python functions, edges (including conditional ones) decide what runs next, and a typed state is passed between them. Strictly, a plain tool-calling loop with the Anthropic SDK could do the core work. LangGraph earns its place through durable state: an investigation pauses for human review (`interrupt()`) and resumes hours later, even after a restart. It also provides step streaming, explicit control-flow guardrails (step budgets, evidence checks) that can be tested on their own, replay for debugging, and automatic Langfuse tracing.
+
+**Why Postgres with LangGraph? Is it common, and what are the alternatives?**
+LangGraph's checkpointer saves a snapshot of the graph state after every step, keyed by thread (`investigation_id` or `conversation_id`). That is what makes pause/resume, crash recovery, replay and multiple service instances work. Postgres is the official production checkpointer and what LangGraph's own hosted platform uses, and we already run it, so it adds a schema, not infrastructure. Alternatives: in-memory (tests only), SQLite (single process, local), Redis (fast, needs durability config), MongoDB, community DynamoDB, or a custom saver. Checkpoints are serialized agent memory, not reporting data, which is why cases and diagnoses also have their own tables. Use in-memory in unit tests and Postgres everywhere else.
+
+**How is data streamed back to the console? Do we stream the LLM response?**
+Over Server-Sent Events. The graph runs in the background and emits our own event types (step started, tool call, evidence, diagnosis), mapped from LangGraph's stream modes. Every event is saved, so a refresh or reconnect replays what was missed. LLM tokens are streamed only for plain-language text people read (the customer's answer, the copilot's final explanation). Triage labels, tool calls and structured diagnoses are sent as complete events, because partial versions are useless.
+
+**How do investigations get created, and how does an ops agent pick one? Do we just run all of them?**
+Every new case is investigated automatically: creating the case also queues an investigation, and background workers pick it up. The ops agent works from a case queue and usually opens a case whose diagnosis is already waiting for review. Only enabled issue types run automatically; others are parked as `needs_manual` until the ops agent clicks Investigate. Running every scenario at once is what the evaluation run does, not the UI.
+
+**If investigations run automatically, why do we need SSE? For retries?**
+Not for retries: those happen entirely on the server (the worker retries the job and LangGraph resumes from its checkpoint). SSE matters when someone is watching a run that is still going: opening a case right after a simulation, re-running a rejected or `needs_manual` case, and the queue updating by itself. Finished runs are loaded with a normal request. Polling would also work, especially for the queue; the server side is the same either way.
+
+**Why does the simulation live inside the banking service?**
+The banking service owns the banking data and the rules that decide outcomes, so it is the only place that can create a consistent incident (for example a frozen card plus declines with the matching reason). The agents must stay read-only, so they cannot create incidents themselves. The simulation module sets up the situation and lets the real rules produce the outcome, and it is gated behind a Spring profile.
+
+**Would this really be a separate service, with the banking service used only for the POC?**
+Yes. In a real system nothing is simulated: incidents come from real activity, and test environments would use a separate traffic generator acting as the outside world. Here the banking service is itself a stand-in for core banking and its surroundings, so putting the simulation module inside it is a deliberate POC shortcut that can later move out without changing the agents.
+
+**Is this only for complaints from users in the app, or other triggers too?**
+v1 is complaint-driven: the in-app assistant, email, phone, an ops agent's own case, and simulations. The case model is generic (`source`, optional complaint, `trigger_payload`), so proactive, event-triggered investigations (for example a failed direct debit, before the customer complains) can be added later as a new source. System-wide incidents across many customers are a different problem and out of scope.
+
+**How do we know which lookups to run? Is an LLM used to categorise issues?**
+Yes, a cheap LLM call (triage) categorises each issue, but in a constrained way: it must choose from a fixed set of categories with a confidence score, and it is grounded by a signal snapshot of the customer's recent activity fetched without an LLM. Low confidence falls back to `other`. Wrong categories are caught by the evidence check and by human review. Each category then has its own investigator with a restricted tool set and a playbook checklist that guides which lookups to run. Triage accuracy is scored on its own.
+
+**In short, what is triage?**
+The first step that decides what kind of problem this is (card decline, missed payment, failed direct debit, or other), so the right specialist handles it. It is one quick, cheap classification, not the investigation itself. The term comes from hospitals, where patients are sorted before a doctor sees them.
+
+**Can the design support both the ops copilot and the customer assistant?**
+Yes, as two agents on one shared platform. The in-app assistant is the customer's first point of contact: it categorises, answers what it can, and hands off the rest as already-categorised cases with the transcript and evidence. The ops copilot verifies that category instead of trusting it blindly, investigates, and an ops agent reviews. Triage, banking tools, LLM access, guardrails and tracing are shared.
