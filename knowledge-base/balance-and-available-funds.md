@@ -1,24 +1,23 @@
 # Your balance and available funds
 
-The app shows two amounts for your account. They can be different, and it is the **available balance** that decides whether a payment goes through.
+The app shows two amounts for your account. They are different when you have an overdraft, and it is the **available balance** that decides whether a payment goes through.
 
 ## Balance
 
-Your balance is the money in your account after all payments that have finished going through (booked transactions).
+Your balance is the money in your account after all your payments in and out. Card payments are taken from your balance as soon as they are approved, so your balance is always up to date.
 
 ## Available balance
 
 Your available balance is what you can spend right now:
 
 - your balance,
-- plus any overdraft you have,
-- minus card payments that are still pending.
+- plus any overdraft you have.
 
-A **pending** card payment is one a shop has been approved for but has not yet collected. The money is set aside, so it is not available to spend again, even though your balance has not changed yet. Some pending payments, for example hotel or car hire deposits, can be held for a few days.
+If you have no overdraft, your available balance is the same as your balance. If you have an overdraft, you can spend up to your overdraft limit below zero.
 
 ## Why a payment can fail with "insufficient funds"
 
-A card payment, standing order, scheduled payment or Direct Debit fails when it is more than your available balance at the moment it is made. This can happen even if your balance looks high enough, because of pending card payments, or because other payments went out first on the same day.
+A card payment, standing order, scheduled payment or Direct Debit fails when it is more than your available balance at the moment it is made. This can happen even if your balance looked high enough earlier, because other payments went out first, for example on the same day.
 
 ## What you can do
 

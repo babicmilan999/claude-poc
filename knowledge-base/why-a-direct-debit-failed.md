@@ -26,9 +26,11 @@ What to do: add money to your account and contact the company to arrange the pay
 
 The company told us the arrangement this Direct Debit belongs to has been closed on their side, so the collection failed. Our team needs to look into this with you: ask the assistant, which will pass your question to our team, or see [How to contact support](contact-support.md).
 
-## Your account is closed
+## Your account is closed or frozen
 
-Direct Debits cannot be collected from a closed account. See [When your account is frozen or closed](account-frozen-or-closed.md).
+Direct Debits cannot be collected while your account is closed or frozen. The collection shows as failed in both cases.
+
+What to do: contact us, because only our team can help with an account that is frozen or closed. Let the company know so you can agree another way to pay. See [When your account is frozen or closed](account-frozen-or-closed.md).
 
 ## A payment you were expecting is not a Direct Debit
 

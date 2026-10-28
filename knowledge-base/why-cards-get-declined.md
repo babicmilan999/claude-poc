@@ -10,7 +10,7 @@ You (or someone with access to your app) froze the card. Frozen cards decline ev
 
 ## Not enough money in your account
 
-The payment was more than your available balance. Your available balance is your balance plus any overdraft you have, minus card payments that are still pending. See [Your balance and available funds](balance-and-available-funds.md).
+The payment was more than your available balance. Your available balance is your balance plus any overdraft you have. See [Your balance and available funds](balance-and-available-funds.md).
 
 ## Your card has expired
 

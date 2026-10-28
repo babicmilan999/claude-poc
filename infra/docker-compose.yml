@@ -95,8 +95,22 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-app}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-app}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      # Seeds the demo customers when the database is empty.
+      BANKING_SEED_ENABLED: ${BANKING_SEED_ENABLED:-true}
     ports:
       - "8080:8080"
+    healthcheck:
+      # Spring actuator. The eclipse-temurin JRE image is not guaranteed to ship
+      # curl or wget, so this uses bash's /dev/tcp (always present on its Ubuntu base).
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /actuator/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"UP\"' <&3"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   agent-service:
     # FastAPI + investigation workers + customer simulator (one container for the POC).
@@ -107,7 +121,7 @@ services:
       postgres:
         condition: service_healthy
       banking-service:
-        condition: service_started
+        condition: service_healthy
       litellm:
         condition: service_healthy
       langfuse-web:
@@ -123,11 +137,20 @@ services:
       MAX_PARALLEL_INVESTIGATIONS: ${MAX_PARALLEL_INVESTIGATIONS:-1}
       SIMULATION_ENABLED: ${SIMULATION_ENABLED:-true}
       TRIAGE_CONFIDENCE_THRESHOLD: ${TRIAGE_CONFIDENCE_THRESHOLD:-0.6}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      BANKING_TIMEOUT_SECONDS: ${BANKING_TIMEOUT_SECONDS:-10}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4200,http://localhost:4300}
+      MIGRATE_ON_STARTUP: ${MIGRATE_ON_STARTUP:-true}
       LANGFUSE_HOST: http://langfuse-web:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       # Articles are ingested at startup; they live outside the build context.
       KB_PATH: /app/knowledge-base
+      KB_INGEST_ON_STARTUP: ${KB_INGEST_ON_STARTUP:-true}
+      KB_ARTICLE_BASE_URL: ${KB_ARTICLE_BASE_URL:-/help/}
+      # Must be a 384-dimensional embedding model (the kb vector column).
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
     volumes:
       - ../knowledge-base:/app/knowledge-base:ro
     ports:
