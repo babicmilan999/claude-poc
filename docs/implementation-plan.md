@@ -65,6 +65,12 @@ Needs Docker and Ollama, so it runs locally (or later in GitHub Actions).
 
 Add questions found during the build here, with the task they came from.
 
+- **Re-investigate while awaiting review** (Agent API contract). Section 5 allows one active investigation per case, and section 9 lists investigation statuses `queued, running, awaiting_review, completed, failed`. What happens to an investigation paused at `interrupt()` when Re-investigate starts a new one is not specified. The contract adds status `superseded` for it and rejects Re-investigate (409) while one is `queued` or `running`. Confirm, then add `superseded` to section 9.
+- **Extra investigation SSE events** (Agent API contract). Section 8 lists `step_started, classified, tool_call, evidence, token, diagnosis, awaiting_review`. The contract adds `escalated` (escalate has no diagnosis to show), `review_recorded` and `status_changed` (so the timeline shows the review and the end of a run). Confirm, then add them to section 8.
+- **"Account closed by the originator"** (Banking API contract). The failed direct debit `needs_human` row in section 5 is ambiguous. The contract reads it as the originator's side closing the account the collection belongs to (root cause `account_closed_by_originator`, failure code `ACCOUNT_CLOSED_BY_ORIGINATOR`). Confirm the meaning, so banking-dev can write the rule.
+- **👍 / 👎 versus "did this help?"** (Agent API contract). Section 4 has both a 👍 / 👎 per answer and the customer confirming an answer helped. The contract treats them as one signal: `up` resolves the conversation, `down` counts as "that didn't help" for the repeated-failure rule.
+- **Customer session** (Agent API contract). "Log in as" is passed as an `X-Customer-Id` header on customer endpoints; the server injects it into customer-scoped tools. Dev-only, no real authentication.
+
 ## Progress notes
 
 Add a short note per session: date, phase, what was done, what is left.
