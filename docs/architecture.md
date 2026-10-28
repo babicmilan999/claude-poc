@@ -796,7 +796,7 @@ claude-poc/
 
 ## Design Q&A
 
-Questions raised while designing, with short answers. Details are in the sections above.
+Questions raised while designing, with short answers. Details are in the sections above. For a guided version with an end-to-end example, the design's history and self-check questions, see the [study guide](study-guide.md).
 
 **Are all these technologies free to use (for example AWS Bedrock and Langfuse)?**
 Almost everything is free and open source: LangGraph, LiteLLM, FastAPI, Spring Boot, Angular, PostgreSQL, Docker, Terraform, and Langfuse when self-hosted (Langfuse Cloud also has a free tier). The paid parts are LLM tokens (Anthropic API or Bedrock, pay per token, no permanent free tier) and AWS hosting (hourly charges). That is why the design is local-first: running in Docker Compose with the default `ollama` profile costs nothing, and Claude tokens are paid only once the `anthropic` or `mixed` profile is used for evals and demos.
