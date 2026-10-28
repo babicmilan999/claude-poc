@@ -1,0 +1,25 @@
+.head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.head h2 { margin: 0; }
+h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7385; margin: 16px 0 8px; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+ol { list-style: none; margin: 0; padding: 0; border-left: 2px solid #dde1e8; }
+li { padding: 4px 0 4px 12px; position: relative; }
+li::before { content: ''; position: absolute; left: -5px; top: 10px; width: 8px; height: 8px; border-radius: 50%; background: #c5cbd6; }
+li.step { color: #4b5468; }
+li.tool code { font-size: 12px; }
+li.milestone { font-weight: 600; }
+li.milestone::before { background: #2457c5; }
+.result { padding: 2px 4px; border-radius: 4px; }
+.hl { background: #fff6d6; }
+.diagnosis { background: #f6f8fd; border-radius: 8px; padding: 4px 12px 12px; }
+.escalation { background: #fdf3f2; }
+.explanation { white-space: pre-wrap; }
+.links { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.review, .review-done { border-top: 1px solid #eef0f4; margin-top: 12px; }
+.verdicts { display: flex; gap: 16px; }
+.verdicts label { font-weight: normal; margin: 0; }
+textarea, select { width: 100%; }
+button[type='submit'] { margin-top: 12px; }
+.caret { animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
