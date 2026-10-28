@@ -1,0 +1,67 @@
+[project]
+name = "agent-service"
+version = "0.1.0"
+description = "Payments support AI: customer assistant and ops copilot (FastAPI, LangGraph)."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.20.1",
+    "fastapi>=0.162.0",
+    "fastembed>=0.9.1",
+    "httpx>=0.28.1",
+    "langchain-core>=1.7.1",
+    "langchain-openai>=1.7.3",
+    "langfuse>=5.0.4",
+    "langgraph>=1.2.18",
+    "langgraph-checkpoint-postgres>=3.2.0",
+    "pgvector>=0.5.1",
+    "psycopg[binary,pool]>=3.3.6",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.2",
+    "pyyaml>=6.0.3",
+    "sqlalchemy[asyncio]>=2.1.6",
+    "sse-starlette>=3.6.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "jsonschema>=4.26.0",
+    "mypy>=2.4.0",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+    "ruff>=0.17.3",
+    "types-pyyaml>=6.0.12.20260906",
+]
+
+[tool.uv]
+# An application, not a library: packages (core/, and later assistant/, investigation/,
+# simulation/, evals/) are imported from the project root.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra -m 'not integration'"
+markers = [
+    "integration: needs a real Postgres with pgvector (TEST_DATABASE_URL); skipped by default",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:langfuse.*",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+# Line length is left to the formatter; long prompt and description strings are fine.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+check_untyped_defs = true
