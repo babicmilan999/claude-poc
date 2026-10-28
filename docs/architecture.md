@@ -304,7 +304,7 @@ The handoff creates a case with `source = assistant_handoff`, the **category**, 
 
 ## 5. Cases and automatic investigation
 
-A **case** is a problem waiting for the ops team. An **investigation** is one run of the ops copilot on a case. Every new case is investigated automatically; the ops agent can re-run it (for example after rejecting a diagnosis), which creates a new investigation on the same case.
+A **case** is a problem waiting for the ops team. An **investigation** is one run of the ops copilot on a case. Every new case is investigated automatically. **Rejecting** a diagnosis with a hint resumes the **same** investigation (same LangGraph thread, the hint added to its state). The ops agent can also click **Re-investigate**, which starts a **new** investigation on the same case from scratch, for example after the case has changed or a run went badly wrong. Only one investigation per case is active at a time.
 
 ```mermaid
 flowchart LR
@@ -380,7 +380,7 @@ You can watch the conversation live in the customer app's watch mode, then follo
 ### Ops console screens
 
 1. **Case queue:** open cases with customer, source, category, age and status. Buttons: **Simulate customer**, **Simulate email complaint** (each with an optional scenario-type picker) and **New case**.
-2. **Case detail:** the case summary, and for handed-off cases the **conversation transcript** and the assistant's category and evidence; the investigation timeline (live or replayed); the diagnosis with linked evidence; the review panel (accept, correct, reject with hint). Earlier investigations of the same case are listed below.
+2. **Case detail:** the case summary, and for handed-off cases the **conversation transcript** and the assistant's category and evidence; the investigation timeline (live or replayed); the diagnosis with linked evidence; the review panel (accept, correct, reject with hint) and a **Re-investigate** button. Earlier investigations of the same case are listed below.
 3. **Conversations:** a list of assistant conversations with outcome (resolved, handed off, abandoned), for spot checks.
 4. **New case form:** pick a customer, write any complaint, choose a source.
 
@@ -843,6 +843,10 @@ claude-poc/
 │   │   ├── mixed.yaml       # open models for triage/simulator, Claude for the rest
 │   │   └── aws.yaml         # optional, Bedrock
 │   └── terraform/           # optional, later
+├── contracts/            # OpenAPI specs and scenario schema shared by the apps
+├── docs/                 # this design, study guide, implementation plan
+├── .claude/              # subagents and the build-phase skill for building with Claude Code
+├── CLAUDE.md             # rules for every Claude Code session in this repo
 ├── .env.example          # LLM_PROFILE, OLLAMA_BASE_URL, ANTHROPIC_API_KEY (optional), AUTO_INVESTIGATE_TYPES, SIMULATION_ENABLED, Langfuse keys
 └── .github/workflows/
 ```

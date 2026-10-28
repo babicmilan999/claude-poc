@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Each check runs only once its app exists, so the workflow can be added before the code.
+# hashFiles() only works in step conditions, so the checks are guarded per step.
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ hashFiles('contracts/*.yaml') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: ${{ hashFiles('contracts/*.yaml') != '' }}
+        run: make lint-contracts
+
+  agent-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ hashFiles('agent-service/pyproject.toml') != '' }}
+        uses: astral-sh/setup-uv@v6
+      - if: ${{ hashFiles('agent-service/pyproject.toml') != '' }}
+        run: make test-agent
+
+  banking-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ hashFiles('banking-service/pom.xml') != '' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+          cache-dependency-path: banking-service/pom.xml
+      - if: ${{ hashFiles('banking-service/pom.xml') != '' }}
+        run: make test-banking
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ hashFiles('frontend/package-lock.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - if: ${{ hashFiles('frontend/package-lock.json') != '' }}
+        run: make test-frontend
