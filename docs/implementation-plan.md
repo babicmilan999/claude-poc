@@ -25,9 +25,9 @@ No parallel work: everything later depends on this.
   Done when: lints clean; every ops console and customer app screen in the doc maps to endpoints.
 - [x] **Scenario format** (owner: orchestrator): `contracts/scenario.schema.json` for eval and simulation scenarios (incident type, complaint, persona hints, expected issue type, root cause, outcome), with two examples.
   Done when: the examples validate against the schema.
-- [~] **CI runs** (owner: orchestrator): `.github/workflows/ci.yml` calls the make targets.
+- [x] **CI runs** (owner: orchestrator): `.github/workflows/ci.yml` calls the make targets.
   Done when: CI is green on the Phase 0 PR.
-  Note: `ci.yml` already calls the make targets; not yet confirmed green, because the session could not push (GitHub 403).
+  Note: green on the Phase 0 PR and on `main` after the merge.
 
 ## Phase 1 — Components against the contracts (parallel)
 
