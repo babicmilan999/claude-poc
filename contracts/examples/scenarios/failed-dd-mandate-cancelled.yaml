@@ -1,0 +1,29 @@
+# Example scenario: the customer calls it a missed payment, but the facts say
+# a direct debit failed because they cancelled the mandate. Facts win in triage.
+id: failed-dd-mandate-cancelled
+title: Rent did not go out because the direct debit mandate was cancelled
+tags: [failed_direct_debit, self_serve, misleading_wording]
+incident:
+  type: failed_direct_debit
+  root_cause: mandate_cancelled_by_customer
+  params:
+    originator: Acme Lettings
+complaint: >-
+  My letting agent says my rent didn't go out this month. It always goes out
+  automatically. Please look into it.
+persona:
+  vagueness: high
+  patience: low
+  tone: anxious
+  phrasing:
+    - "my rent didn't go out"
+    - "the payment to my landlord failed"
+  knows:
+    - the letting agent says this month's rent was not paid
+    - the rent is normally taken automatically
+    - they cancelled some old direct debits a few weeks ago
+  max_turns: 6
+expected:
+  issue_type: failed_direct_debit
+  root_cause: mandate_cancelled_by_customer
+  outcome: self_serve
