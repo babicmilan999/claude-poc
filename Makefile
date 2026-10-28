@@ -17,7 +17,7 @@ help:
 	@echo "make bundle-contracts  single-file specs for code generators (contracts/dist/)"
 	@echo "make up / down       start / stop the full stack in Docker Compose"
 	@echo "make infra           start only Postgres, LiteLLM and Langfuse"
-	@echo "make models          pull the Ollama models of LLM_PROFILE"
+	@echo "make models          pull the Ollama models of LLM_PROFILE (env or .env)"
 
 test: test-agent test-banking test-frontend
 
@@ -45,18 +45,19 @@ bundle-contracts:
 	cd contracts && $(REDOCLY) bundle banking-api.yaml -o dist/banking-api.yaml
 	cd contracts && $(REDOCLY) bundle agent-api.yaml -o dist/agent-api.yaml
 
+# Both create .env from .env.example if needed and fill the Langfuse keys (first run).
 up:
-	@if [ -f infra/docker-compose.yml ]; then $(COMPOSE) up -d --build; \
+	@if [ -f infra/docker-compose.yml ]; then infra/scripts/langfuse-setup.sh && $(COMPOSE) up -d --build; \
 	else echo "up: skipped (infra/docker-compose.yml not written yet)"; fi
 
 down:
-	@if [ -f infra/docker-compose.yml ]; then $(COMPOSE) down; \
+	@if [ -f infra/docker-compose.yml ]; then $(COMPOSE) --profile ollama down; \
 	else echo "down: skipped (infra/docker-compose.yml not written yet)"; fi
 
 infra:
-	@if [ -f infra/docker-compose.yml ]; then $(COMPOSE) up -d $(INFRA_SERVICES); \
+	@if [ -f infra/docker-compose.yml ]; then infra/scripts/langfuse-setup.sh && $(COMPOSE) up -d $(INFRA_SERVICES); \
 	else echo "infra: skipped (infra/docker-compose.yml not written yet)"; fi
 
 models:
-	@if [ -x infra/scripts/pull-models.sh ]; then infra/scripts/pull-models.sh "$${LLM_PROFILE:-ollama}"; \
+	@if [ -x infra/scripts/pull-models.sh ]; then infra/scripts/pull-models.sh "$${LLM_PROFILE:-}"; \
 	else echo "models: skipped (infra/scripts/pull-models.sh not written yet)"; fi
