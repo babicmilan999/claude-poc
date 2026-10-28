@@ -11,7 +11,7 @@ from typing import Annotated, Any
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from core.banking import BankingClient
+from core.banking import BankingClient, BankingError, BankingNotFound
 from core.jobs import JobQueue
 from core.kb import KnowledgeBaseSearch
 from core.llm import LiteLLMProvider, LLMProvider
@@ -69,18 +69,40 @@ def get_context(request: Request) -> AppContext:
     return ctx  # type: ignore[no-any-return]
 
 
+def _unauthorized(detail: str) -> HTTPException:
+    # The contract declares 401 for every customer-app endpoint: a missing, malformed or
+    # unknown `X-Customer-Id` means "not logged in", never 400 or 404.
+    return HTTPException(status_code=401, detail=detail)
+
+
 def get_session_customer_id(
     x_customer_id: Annotated[str | None, Header(alias="X-Customer-Id")] = None,
 ) -> str:
     """The logged-in customer from the `X-Customer-Id` header (dev-only "log in as").
-    This is the only source of `customer_id` for customer-scoped tools."""
+    This is the only source of `customer_id` for customer-scoped tools. Checks the format
+    only; use `KnownCustomerId` to also check that the customer exists."""
     if not x_customer_id:
-        raise HTTPException(status_code=400, detail="X-Customer-Id header is required")
+        raise _unauthorized("X-Customer-Id header is required")
     try:
         return str(uuid.UUID(x_customer_id))
     except ValueError:
-        raise HTTPException(status_code=400, detail="X-Customer-Id must be a UUID") from None
+        raise _unauthorized("X-Customer-Id must be a UUID") from None
 
 
 Context = Annotated[AppContext, Depends(get_context)]
 SessionCustomerId = Annotated[str, Depends(get_session_customer_id)]
+
+
+async def get_known_customer_id(ctx: Context, customer_id: SessionCustomerId) -> str:
+    """`SessionCustomerId` that the banking service knows: 401 for an unknown customer,
+    502 if the banking service cannot be reached."""
+    try:
+        await ctx.banking.get_customer(customer_id)
+    except BankingNotFound:
+        raise _unauthorized("unknown customer") from None
+    except BankingError as exc:
+        raise HTTPException(status_code=502, detail="banking service unavailable") from exc
+    return customer_id
+
+
+KnownCustomerId = Annotated[str, Depends(get_known_customer_id)]

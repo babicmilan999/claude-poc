@@ -17,13 +17,14 @@ MANAGED_SCHEMAS = {AGENTS_SCHEMA, KB_SCHEMA}
 VERSION_TABLE_SCHEMA = AGENTS_SCHEMA
 
 config = context.config
-if config.config_file_name is not None:
+# The app's startup migration (`core.db.migrate`) keeps its own logging configuration.
+if config.config_file_name is not None and config.attributes.get("configure_logging", True):
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 target_metadata = Base.metadata
 
 
 def _url() -> str:
-    override = context.get_x_argument(as_dictionary=True).get("url")
+    override = context.get_x_argument(as_dictionary=True).get("url") or config.attributes.get("database_url")
     if override:
         return Settings(database_url=override).sqlalchemy_url
     return Settings().sqlalchemy_url

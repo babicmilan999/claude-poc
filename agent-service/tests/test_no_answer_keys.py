@@ -36,7 +36,8 @@ def test_tools_have_no_answer_keys(banking) -> None:
         banking, "11111111-1111-4111-8111-111111111111"
     )
     for tool in tools:
-        surface = tool.description + json.dumps(tool.tool_call_schema.model_json_schema())
+        schema = tool.tool_call_schema.model_json_schema()  # type: ignore[union-attr]
+        surface = tool.description + json.dumps(schema)
         for key in ANSWER_KEYS:
             assert key not in surface.lower(), tool.name
 

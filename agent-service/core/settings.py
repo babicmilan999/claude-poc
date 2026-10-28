@@ -24,6 +24,8 @@ class Settings(BaseSettings):
 
     # --- Agent service -------------------------------------------------------
     database_url: str = "postgresql://app:app@localhost:5432/app"
+    # Run `alembic upgrade head` at startup, before KB ingestion (only when DATABASE_URL is set).
+    migrate_on_startup: bool = True
     banking_api_url: str = "http://localhost:8080"
     banking_timeout_seconds: float = 10.0
     auto_investigate_types: Annotated[list[IssueType], NoDecode] = Field(

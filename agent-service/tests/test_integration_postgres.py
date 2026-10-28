@@ -92,6 +92,15 @@ async def _new_case(session: AsyncSession) -> Case:
     return case
 
 
+def test_startup_migration_is_idempotent(migrated: None) -> None:
+    """What the app runs at startup (MIGRATE_ON_STARTUP) on an up-to-date database."""
+    from core.db.migrate import should_migrate, upgrade_head
+
+    settings = _settings()
+    assert should_migrate(settings)
+    upgrade_head(settings)
+
+
 async def test_enqueue_and_claim_with_skip_locked(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     queue = JobQueue(sessionmaker)
     async with sessionmaker.begin() as session:
@@ -164,6 +173,17 @@ async def test_stale_jobs_are_requeued(sessionmaker: async_sessionmaker[AsyncSes
     assert requeued == [job.investigation_id] and failed == []
     again = await queue.claim_next("w2")
     assert again is not None and again.attempts == 2
+
+    # The dead worker comes back: it no longer owns the job and cannot change it.
+    assert await queue.release_for_retry(job, "late failure", max_attempts=3) is None
+    assert await queue.finish(job, InvestigationStatus.COMPLETED) is False
+    async with sessionmaker() as session:
+        row = (await session.execute(select(Investigation))).scalar_one()
+    assert row.status == "running" and row.worker_id == "w2" and row.error is None
+    assert await queue.finish(again, InvestigationStatus.COMPLETED) is True
+    async with sessionmaker() as session:
+        row = (await session.execute(select(Investigation))).scalar_one()
+    assert row.status == "completed" and row.worker_id is None and row.finished_at is not None
 
 
 async def test_requeue_with_resume_payload(sessionmaker: async_sessionmaker[AsyncSession]) -> None:

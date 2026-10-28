@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from core.api import router as core_router
 from core.context import AppContext, build_context
+from core.db.migrate import should_migrate, upgrade_head
 from core.kb.ingest import ingest_knowledge_base
 from core.settings import Settings, get_settings
 
@@ -66,12 +67,16 @@ def create_app(
     *,
     context_factory: Callable[[Settings], AppContext] = build_context,
     feature_modules: Sequence[str] = FEATURE_MODULES,
+    migrate: Callable[[Settings], None] = upgrade_head,
 ) -> FastAPI:
     settings = settings or get_settings()
     modules = load_feature_modules(feature_modules)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if should_migrate(settings):
+            # Before anything touches the tables; a failure stops the startup.
+            await asyncio.to_thread(migrate, settings)
         ctx = context_factory(settings)
         app.state.context = ctx
         ingest_task: asyncio.Task[None] | None = None

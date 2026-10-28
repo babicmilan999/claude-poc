@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from core.banking import BankingError, BankingNotFound
-from core.context import Context, SessionCustomerId
+from core.context import Context, KnownCustomerId
 from core.tools.customer_views import mask_account_number
 
 router = APIRouter()
@@ -78,7 +78,7 @@ async def list_customers(ctx: Context) -> list[CustomerSummary]:
 
 
 @router.get("/me/overview", response_model=CustomerOverview, tags=["customer-account"])
-async def my_overview(ctx: Context, customer_id: SessionCustomerId) -> CustomerOverview:
+async def my_overview(ctx: Context, customer_id: KnownCustomerId) -> CustomerOverview:
     banking = ctx.banking
     try:
         customer, accounts, cards = await asyncio.gather(
@@ -90,7 +90,8 @@ async def my_overview(ctx: Context, customer_id: SessionCustomerId) -> CustomerO
             *(banking.list_transactions(customer_id, a.id, limit=RECENT_TRANSACTIONS) for a in accounts)
         )
     except BankingNotFound as exc:
-        raise HTTPException(status_code=404, detail="customer not found") from exc
+        # Gone between the session check and these calls: treat as not logged in.
+        raise HTTPException(status_code=401, detail="unknown customer") from exc
     except BankingError as exc:
         raise HTTPException(status_code=502, detail="banking service unavailable") from exc
 

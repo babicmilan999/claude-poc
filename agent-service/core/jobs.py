@@ -12,6 +12,11 @@ The `queued` rows of `agents.investigations` are the queue; there is no broker.
   after `max_attempts`.
 - `NotificationListener` wakes idle workers on `NOTIFY`; workers also poll, so a missed
   notification only delays a job.
+- Every write by a worker after the claim (`heartbeat`, `release_for_retry`, `finish`)
+  only applies while the job is still `running` under that worker's `worker_id`: once
+  `requeue_stale()` has handed a slow worker's job to another worker, the slow worker can
+  no longer change it. They report whether they did; `owned_by(job)` gives the same
+  condition for updates the investigation package makes in its own transactions.
 
 Case status changes (new → investigating, ...) belong to the investigation package.
 """
@@ -25,7 +30,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import Update, and_, func, select, text, update
+from sqlalchemy import ColumnElement, Update, and_, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.db.models import Investigation
@@ -44,11 +49,55 @@ class ClaimedJob:
     trigger: str
     attempts: int
     resume_payload: dict[str, Any] | None
+    worker_id: str
 
 
 async def notify(session: AsyncSession, channel: str, payload: str = "") -> None:
     """`NOTIFY` inside the session's transaction (delivered on commit)."""
     await session.execute(text("SELECT pg_notify(:channel, :payload)"), {"channel": channel, "payload": payload})
+
+
+def owned_by(job: ClaimedJob) -> ColumnElement[bool]:
+    """The job is still running under the worker that claimed it."""
+    return and_(
+        Investigation.id == job.investigation_id,
+        Investigation.worker_id == job.worker_id,
+        Investigation.status == InvestigationStatus.RUNNING.value,
+    )
+
+
+def release_statement(job: ClaimedJob, error: str, *, retry: bool) -> Update:
+    status = InvestigationStatus.QUEUED if retry else InvestigationStatus.FAILED
+    return (
+        update(Investigation)
+        .where(owned_by(job))
+        .values(
+            status=status.value,
+            worker_id=None,
+            error=error[:2000],
+            finished_at=None if retry else func.now(),
+        )
+    )
+
+
+_TERMINAL = frozenset({InvestigationStatus.COMPLETED, InvestigationStatus.FAILED, InvestigationStatus.SUPERSEDED})
+
+
+def finish_statement(job: ClaimedJob, status: InvestigationStatus, error: str | None = None) -> Update:
+    """The worker hands the job off: a final status, or `awaiting_review` (paused at a
+    human review; a review decision queues it again with `requeue`)."""
+    if status in (InvestigationStatus.QUEUED, InvestigationStatus.RUNNING):
+        raise ValueError(f"finish() cannot set {status.value}; use release_for_retry or requeue")
+    return (
+        update(Investigation)
+        .where(owned_by(job))
+        .values(
+            status=status.value,
+            worker_id=None,
+            error=error[:2000] if error else None,
+            finished_at=func.now() if status in _TERMINAL else None,
+        )
+    )
 
 
 def claim_statement(worker_id: str) -> Update:
@@ -125,6 +174,7 @@ class JobQueue:
             trigger=row.trigger,
             attempts=row.attempts,
             resume_payload=row.resume_payload,
+            worker_id=worker_id,
         )
 
     async def heartbeat(self, investigation_id: uuid.UUID, worker_id: str) -> bool:
@@ -143,24 +193,40 @@ class JobQueue:
             )
             return bool(result.rowcount)  # type: ignore[attr-defined]
 
-    async def release_for_retry(self, job: ClaimedJob, error: str, *, max_attempts: int) -> InvestigationStatus:
-        """After a failed run: back to `queued`, or `failed` once attempts are used up."""
+    async def release_for_retry(self, job: ClaimedJob, error: str, *, max_attempts: int) -> InvestigationStatus | None:
+        """After a failed run: back to `queued`, or `failed` once attempts are used up.
+        Returns the new status, or None if the job is no longer this worker's (nothing
+        changed)."""
         retry = job.attempts < max_attempts
         status = InvestigationStatus.QUEUED if retry else InvestigationStatus.FAILED
         async with self._sessionmaker.begin() as session:
-            await session.execute(
-                update(Investigation)
-                .where(Investigation.id == job.investigation_id)
-                .values(
-                    status=status.value,
-                    worker_id=None,
-                    error=error[:2000],
-                    finished_at=None if retry else func.now(),
+            result = await session.execute(release_statement(job, error, retry=retry))
+            if not result.rowcount:  # type: ignore[attr-defined]
+                log.warning(
+                    "investigation %s: not released, no longer owned by worker %s", job.investigation_id, job.worker_id
                 )
-            )
+                return None
             if retry:
                 await notify(session, self.channel, str(job.investigation_id))
         return status
+
+    async def finish(
+        self,
+        job: ClaimedJob,
+        status: InvestigationStatus,
+        *,
+        error: str | None = None,
+        session: AsyncSession | None = None,
+    ) -> bool:
+        """Set a final status (`completed`, `awaiting_review`, `failed`, ...) if the job is
+        still this worker's. With `session`, runs in the caller's transaction (the caller
+        commits). Returns whether the job was updated."""
+        if session is not None:
+            result = await session.execute(finish_statement(job, status, error))
+            return bool(result.rowcount)  # type: ignore[attr-defined]
+        async with self._sessionmaker.begin() as own:
+            result = await own.execute(finish_statement(job, status, error))
+            return bool(result.rowcount)  # type: ignore[attr-defined]
 
     async def requeue_stale(
         self, *, stale_after: timedelta, max_attempts: int

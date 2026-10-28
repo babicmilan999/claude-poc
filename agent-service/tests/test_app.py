@@ -5,6 +5,7 @@ import sys
 import types
 from collections.abc import AsyncIterator
 
+import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
@@ -50,11 +51,24 @@ def test_me_overview(app_client: TestClient) -> None:
     assert [t["description"] for t in body["recent_transactions"]] == ["Coffee House", "Salary"]
 
 
-def test_me_overview_needs_a_valid_customer_header(app_client: TestClient) -> None:
-    assert app_client.get("/me/overview").status_code == 400
-    assert app_client.get("/me/overview", headers={"X-Customer-Id": "not-a-uuid"}).status_code == 400
-    response = app_client.get("/me/overview", headers={"X-Customer-Id": UNKNOWN_CUSTOMER})
-    assert response.status_code == 404
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"X-Customer-Id": ""}, {"X-Customer-Id": "not-a-uuid"}, {"X-Customer-Id": UNKNOWN_CUSTOMER}],
+    ids=["missing", "empty", "not-a-uuid", "unknown"],
+)
+def test_me_overview_without_a_valid_customer_is_401(app_client: TestClient, headers: dict[str, str]) -> None:
+    """The contract declares only 200 and 401 for /me/overview."""
+    response = app_client.get("/me/overview", headers=headers)
+    assert response.status_code == 401
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["status"] == 401
+
+
+def test_me_overview_banking_down_is_502(app_client: TestClient, banking_mock: ContractBankingMock) -> None:
+    """Not in the contract yet (recorded as a contract gap); a problem response all the same."""
+    banking_mock.fail_with["getCustomer"] = 500
+    response = app_client.get("/me/overview", headers={"X-Customer-Id": ALICE})
+    assert response.status_code == 502
     assert response.headers["content-type"].startswith("application/problem+json")
 
 
@@ -117,3 +131,76 @@ def test_main_module_builds_the_app(monkeypatch) -> None:
     assert isinstance(main.app, FastAPI)
     assert {"/health", "/customers", "/me/overview"} <= set(main.app.openapi()["paths"])
     get_settings.cache_clear()
+
+
+# --- startup migrations ------------------------------------------------------------------
+
+
+def test_startup_runs_migrations_before_kb_ingestion(settings: Settings, app_context_factory, monkeypatch) -> None:
+    import core.app as app_module
+
+    events: list[str] = []
+
+    async def fake_ingest(ctx: AppContext) -> None:
+        events.append("ingest")
+
+    monkeypatch.setattr(app_module, "_ingest_kb", fake_ingest)
+    configured = Settings(
+        **{**settings.model_dump(), "database_url": "postgresql://app:app@db:5432/app", "kb_ingest_on_startup": True}
+    )
+    assert configured.migrate_on_startup
+    app = create_app(
+        configured,
+        context_factory=app_context_factory,
+        feature_modules=(),
+        migrate=lambda s: events.append(f"migrate {s.database_url}"),
+    )
+    with TestClient(app) as client:
+        client.get("/health")
+        app.state.kb_ingest_task.result()  # ingestion has run
+    assert events == ["migrate postgresql://app:app@db:5432/app", "ingest"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"migrate_on_startup": False, "database_url": "postgresql://app:app@db:5432/app"}, {}],
+    ids=["disabled", "no-database-url"],
+)
+def test_startup_skips_migrations(settings: Settings, app_context_factory, overrides: dict[str, object]) -> None:
+    calls: list[Settings] = []
+    configured = Settings(**{**settings.model_dump(), **overrides}) if overrides else settings
+    app = create_app(configured, context_factory=app_context_factory, feature_modules=(), migrate=calls.append)
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+    assert calls == []
+
+
+def test_startup_fails_when_migrations_fail(settings: Settings, app_context_factory) -> None:
+    configured = Settings(**{**settings.model_dump(), "database_url": "postgresql://app:app@db:5432/app"})
+
+    def broken(_: Settings) -> None:
+        raise RuntimeError("database unreachable")
+
+    app = create_app(configured, context_factory=app_context_factory, feature_modules=(), migrate=broken)
+    with pytest.raises(RuntimeError, match="database unreachable"), TestClient(app):
+        pass
+
+
+def test_alembic_config_targets_the_service_migrations() -> None:
+    from core.db.migrate import alembic_config
+    from core.settings import AGENT_SERVICE_DIR
+
+    config = alembic_config(Settings(database_url="postgresql://app:app@db:5432/app"))
+    assert config.get_main_option("script_location") == str(AGENT_SERVICE_DIR / "migrations")
+    assert config.attributes["database_url"] == "postgresql://app:app@db:5432/app"
+
+
+def test_migrations_render_offline_with_the_startup_config(capsys) -> None:
+    """`env.py` takes the URL from the startup config; offline (`--sql`) mode needs no database."""
+    from alembic import command
+
+    from core.db.migrate import alembic_config
+
+    command.upgrade(alembic_config(Settings(database_url="postgresql://app:app@db:5432/app")), "head", sql=True)
+    sql = capsys.readouterr().out
+    assert "CREATE TABLE agents.investigations" in sql

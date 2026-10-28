@@ -509,6 +509,7 @@ class ContractBankingMock:
         if handler is None:
             raise ContractViolation(f"{op.operation_id}: not supported by the mock (agents must not call it)")
 
+        assert match is not None
         params = match.groupdict()
         query = dict(request.url.params)
         if op.operation_id == "listCustomers":

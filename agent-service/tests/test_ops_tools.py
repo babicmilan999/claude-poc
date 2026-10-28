@@ -50,7 +50,7 @@ def test_investigator_gets_only_its_tools(banking: BankingClient, issue_type: Is
 
 def test_ops_tools_are_bound_to_the_case_customer(banking: BankingClient) -> None:
     for tool in make_ops_tools(banking, BOB):
-        assert "customer_id" not in tool.tool_call_schema.model_json_schema().get("properties", {})
+        assert "customer_id" not in tool.tool_call_schema.model_json_schema().get("properties", {})  # type: ignore[union-attr]
     with pytest.raises(ValueError):
         make_ops_tools(banking, "")
 

@@ -12,7 +12,12 @@ from tests.fakes import FakeLLMProvider
     ("raw", "expected"),
     [
         ("my card 4111 1111 1111 1111 was declined", "my card [CARD ****1111] was declined"),
-        ("card 4111-1111-1111-1234", "card [CARD ****1234]"),
+        ("card 4000-0566-5566-5556", "card [CARD ****5556]"),
+        ("visa 4222222222222", "visa [CARD ****2222]"),  # 13 digits
+        ("maestro 6759649826438453", "maestro [CARD ****8453]"),
+        ("account number 20261028", "account number ****1028"),  # date-like, but account wording
+        ("acct no. 19991231 and a/c: 20200101", "acct no. ****1231 and a/c: ****0101"),
+        ("transfer to 87654321", "transfer to ****4321"),  # not a valid date
         ("pan 5555555555554444.", "pan [CARD ****4444]."),
         ("amex 3782 822463 10005", "amex [CARD ****0005]"),
         ("sort code 12-34-56 account 12345678", "sort code **-**-** account ****5678"),
@@ -39,10 +44,27 @@ def test_mask_text_masks_identifiers(raw: str, expected: str) -> None:
         "card ending 4242, ****5678",
         "rule FR-12 at MCC 5411",
         "limit 100.00 and 1000000.00",
+        "ref 1730000000000 on 20261028",  # epoch millis (not Luhn) and a YYYYMMDD date
+        "card 4111-1111-1111-1234 is not a real number",  # fails the Luhn check
+        "statement 20260131 to 20260228",
+        "order 1234567890123456789",  # 19 digits, not Luhn
     ],
 )
 def test_mask_text_leaves_ids_dates_and_amounts(safe: str) -> None:
     assert mask_text(safe) == safe
+
+
+def test_luhn() -> None:
+    from core.masking import luhn_valid
+
+    assert luhn_valid("4111111111111111") and luhn_valid("378282246310005")
+    assert not luhn_valid("4111111111111112") and not luhn_valid("1730000000000")
+
+
+def test_mask_by_key_does_not_need_luhn_or_context() -> None:
+    """Known sensitive fields are masked whatever their value looks like."""
+    masked = mask_data({"card_number": "4111111111111112", "account_number": "20261028"})
+    assert masked == {"card_number": "[CARD ****1112]", "account_number": "****1028"}
 
 
 def test_mask_text_is_idempotent() -> None:
@@ -95,9 +117,10 @@ def test_mask_messages_covers_every_message_type() -> None:
     ]
     masked = mask_messages(messages)
     assert masked[1].content == "My card [CARD ****1111] failed"
+    assert isinstance(masked[2], AIMessage)
     assert masked[2].tool_calls[0]["args"] == {"q": "acct ****5678"}
     assert "12-34-56" not in masked[3].content and "GB82" not in masked[3].content
-    assert masked[4].content[0]["text"] == "email [EMAIL]"
+    assert masked[4].content[0]["text"] == "email [EMAIL]"  # type: ignore[index]
     assert messages[1].content == "My card 4111 1111 1111 1111 failed", "originals untouched"
 
 

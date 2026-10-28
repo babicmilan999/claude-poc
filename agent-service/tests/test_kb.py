@@ -132,5 +132,5 @@ async def test_search_tool(kb: KnowledgeBaseSearch) -> None:
     assert len(results) == 2
     assert set(results[0]) == {"article_id", "title", "section", "url", "text"}
     assert results[0]["url"].startswith("/help/")
-    schema = tool.args_schema.model_json_schema()
+    schema = tool.args_schema.model_json_schema()  # type: ignore[union-attr]
     assert schema["additionalProperties"] is False and "customer_id" not in schema["properties"]

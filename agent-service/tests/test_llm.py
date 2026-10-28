@@ -42,6 +42,15 @@ def test_litellm_provider_points_at_the_proxy_with_the_alias_as_model() -> None:
     assert {"llm_alias": "reasoning", "llm_profile": "mixed"}.items() <= (model.metadata or {}).items()
 
 
+@pytest.mark.parametrize("alias", list(ModelAlias))
+def test_litellm_provider_leaves_temperature_to_the_profile(alias: ModelAlias) -> None:
+    """The LiteLLM profile sets per-alias parameters (temperature 0 for triage and judge);
+    the client must not override them."""
+    inner = LiteLLMProvider(Settings()).get(alias).inner
+    assert inner.temperature is None  # type: ignore[attr-defined]
+    assert "temperature" not in inner._default_params  # type: ignore[attr-defined]
+
+
 async def test_invoke_structured_from_tool_call() -> None:
     llm = FakeLLMProvider({"triage": [structured(Verdict(label="x", score=0.5))]})
     out = await invoke_structured(llm.get("triage"), Verdict, [HumanMessage(content="hi")])

@@ -199,7 +199,6 @@ class LiteLLMProvider(LLMProvider):
             timeout=self._settings.llm_timeout_seconds,
             max_retries=self._settings.llm_max_retries,
             stream_usage=True,
-            temperature=0,
         )
 
 

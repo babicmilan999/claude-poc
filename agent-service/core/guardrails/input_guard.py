@@ -51,36 +51,77 @@ class InputGuardResult(BaseModel):
         return self.verdict is InputVerdict.OK
 
 
+# Only unambiguous injection phrasing is blocked by rule. Phrases ordinary payment
+# questions also use ("another person", "a system message", "ignore my last message",
+# "someone else's account" for a misdirected payment, "my customer ID") are left to the
+# model check, which reads the whole message.
+_ROLE_NOUNS = (
+    r"(?:admin|administrator|root|superuser|developer|bank\s+employee|employee|staff\s+member|ops\s+agent|"
+    r"operator|unrestricted|unfiltered|jailbroken|ai|assistant|bot|chatbot|model|dan)"
+)
 _INJECTION_RULES: list[tuple[re.Pattern[str], str]] = [
     (
+        # "ignore all previous instructions", "disregard the above prompt", "override your rules".
+        # Not "ignore the previous instructions from the bank" (a letter, a payment instruction).
         re.compile(
-            r"\b(ignore|disregard|forget|override)\b.{0,40}\b(instructions?|rules|prompt|guidelines|guardrails)\b",
-            re.I | re.S,
+            r"\b(?:ignore|disregard|forget)\s+(?:(?:all|any|of|the|everything)\s+)*"
+            r"(?:(?:previous|prior|preceding|above|earlier|system|initial|original|developer|all|any)\s+)+"
+            r"(?:instructions?|prompts?|guidelines|guardrails|directives|programming)\b"
+            r"(?!\s+(?:from|in|on|about|for|of|to|i|we|you|the\s+bank)\b)"
+            r"|\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+|any\s+|of\s+)*your\s+(?:own\s+|previous\s+)?"
+            r"(?:instructions?|prompts?|rules|guidelines|guardrails|directives|programming)\b",
+            re.I,
         ),
         "asks to ignore the assistant's instructions",
     ),
-    (re.compile(r"\b(system|developer)\s+(prompt|message|instructions?)\b", re.I), "asks about the system prompt"),
     (
-        re.compile(r"\b(reveal|show|print|repeat)\b.{0,30}\b(your|the)\s+(prompt|instructions?)\b", re.I | re.S),
+        re.compile(
+            r"\bsystem\s+prompts?\b|\b(?:system|developer)\s+instructions\b|\bdeveloper\s+(?:prompt|message)s?\b", re.I
+        ),
+        "asks about the system prompt",
+    ),
+    (
+        re.compile(
+            r"\b(?:reveal|show|print|repeat|output|tell|give)\s+(?:me\s+|us\s+)?"
+            r"(?:your|the\s+(?:hidden|secret|initial|original))\s+(?:hidden\s+|secret\s+|initial\s+|original\s+)?"
+            r"(?:prompts?|instructions)\b",
+            re.I,
+        ),
         "asks to reveal the assistant's instructions",
     ),
     (
         re.compile(
-            r"\b(you are now|pretend (to be|you are)|act as (an?|the) (admin|developer|bank employee|ops agent))\b",
+            r"\b(?:you\s+are\s+now|from\s+now\s+on\s+you\s+are|pretend\s+(?:to\s+be|you\s+are)|act\s+as)\s+"
+            r"(?:an?\s+|the\s+|my\s+)?(?:\w+\s+)?" + _ROLE_NOUNS + r"\b"
+            r"|\byou\s+are\s+now\s+in\s+\w+\s+mode\b",
             re.I,
         ),
         "tries to change the assistant's role",
     ),
-    (re.compile(r"\b(jailbreak|dan mode|developer mode)\b", re.I), "jailbreak attempt"),
     (
-        re.compile(r"\b(another|other|different)\s+(customer|person|user|account holder)('?s)?\b", re.I),
+        re.compile(r"\b(?:jailbreak\s+(?:mode|prompt)|dan\s+mode|developer\s+mode|do\s+anything\s+now)\b", re.I),
+        "jailbreak attempt",
+    ),
+    (
+        # "show me another customer's balance", "give me someone else's transactions"
+        re.compile(
+            r"\b(?:show|give|tell|send|list|read|view|access|look\s+up|pull\s+up|display)\s+(?:me\s+|us\s+)?"
+            r"(?:the\s+|all\s+)?(?:(?:another|other|a\s+different)\s+(?:customer|user|account\s+holder)(?:'s|s')"
+            r"|(?:someone|somebody|anyone|anybody)\s+else'?s\b)",
+            re.I,
+        ),
         "asks about another customer's data",
     ),
     (
-        re.compile(r"\bsomeone else'?s\s+(account|card|data|details|balance|payments?)\b", re.I),
-        "asks about someone else's data",
+        # The session decides the customer: `customer_id`, "use customer id ...", "customer id: <uuid>"
+        re.compile(
+            r"\bcustomer_id\b"
+            r"|\b(?:use|set|switch\s+to|change|with|as)\s+(?:the\s+|my\s+)?customer[\s-]?id\b"
+            r"|\bcustomer[\s-]?id\s*(?:[:=]|is|to)?\s*[0-9a-f]{8}-[0-9a-f]{4}-",
+            re.I,
+        ),
+        "tries to choose a customer id",
     ),
-    (re.compile(r"\bcustomer[\s_-]?id\b", re.I), "tries to choose a customer id"),
 ]
 
 
