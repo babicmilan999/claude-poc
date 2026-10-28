@@ -85,7 +85,7 @@ export const SCRIPTS: IncidentScript[] = [
     answer:
       'Your card ending 4821 expired at the end of last month, so payments are declined. ' +
       'Your replacement card was sent on the 2nd; activate it in Cards once it arrives.',
-    sources: [ACCOUNT('get_my_cards', 'Your cards'), ARTICLE('card-expiry-and-replacement', 'Card expiry and replacement')],
+    sources: [ACCOUNT('get_my_cards', 'Your cards'), ARTICLE('expired-cards-and-replacements', 'Expired cards and replacement cards')],
     handoffSummary: 'Customer reports online card payments failing.',
     evidence: [
       {
@@ -149,7 +149,7 @@ export const SCRIPTS: IncidentScript[] = [
       'so it was not paid. It will try again on the next run date, or you can send it now as a one-off payment.',
     sources: [
       ACCOUNT('get_my_scheduled_payments', 'Your scheduled payments'),
-      ARTICLE('how-scheduled-payments-run', 'How and when scheduled payments run'),
+      ARTICLE('how-scheduled-payments-work', 'How standing orders and scheduled payments work'),
     ],
     handoffSummary: 'Customer reports a missed rent standing order.',
     evidence: [
@@ -183,7 +183,7 @@ export const SCRIPTS: IncidentScript[] = [
       'You can split it over two days or change your limit in Settings.',
     sources: [
       ACCOUNT('get_my_scheduled_payments', 'Your scheduled payments'),
-      ARTICLE('payment-limits', 'Payment limits'),
+      ARTICLE('daily-payment-limit', 'Daily payment limit'),
     ],
     handoffSummary: 'Customer reports a failed scheduled payment despite enough balance.',
     evidence: [
@@ -246,7 +246,7 @@ export const SCRIPTS: IncidentScript[] = [
       'To keep paying them, give the gym your details again so they can set up a new mandate.',
     sources: [
       ACCOUNT('get_my_direct_debits', 'Your direct debits'),
-      ARTICLE('how-direct-debits-work', 'How direct debits and mandates work'),
+      ARTICLE('how-direct-debits-work', 'How Direct Debits and mandates work'),
     ],
     handoffSummary: 'Customer reports a failed gym direct debit.',
     evidence: [
@@ -322,5 +322,5 @@ export const LAST_NAMES = ['Patel', 'Reid', 'Silva', 'Turner', 'Ueda', 'Varga', 
 export const GENERIC_ANSWER =
   'I can help with card payments, scheduled payments and direct debits. ' +
   'Could you tell me a bit more about the payment that went wrong?';
-export const GENERIC_SOURCES: Source[] = [ARTICLE('how-to-contact-support', 'How to contact support')];
+export const GENERIC_SOURCES: Source[] = [ARTICLE('contact-support', 'How to contact support')];
 export const HANDOFF_NOTICE = 'An agent will look into this and get back to you.';

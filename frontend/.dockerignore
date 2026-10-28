@@ -1,0 +1,10 @@
+node_modules
+dist
+.angular
+out-tsc
+coverage
+tmp
+.vscode
+.idea
+.git
+npm-debug.log
