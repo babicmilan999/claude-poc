@@ -179,6 +179,43 @@ Both agents are LangGraph graphs in the same Python codebase and share one core:
 
 **Tool scoping.** Tools are plain Python functions with typed inputs. The **customer-scoped** versions never take a `customer_id` from the LLM: the server injects it from the logged-in session, so the assistant cannot read another customer's data however it is prompted. They also return customer-safe fields only (for example a decline reason such as "card frozen", but never fraud-rule details or internal codes). The **ops-scoped** versions return the full records.
 
+**Where tools live.** All tools are in `agent-service/core/tools/`: `banking_ops.py` (ops-scoped), `banking_customer.py` (customer-scoped wrappers around the same HTTP client) and `knowledge_base.py`. Banking tools call the banking service's read-only REST API; `search_knowledge_base` queries pgvector. A tool's docstring and types are the description the LLM sees.
+
+```python
+def make_customer_tools(customer_id: str):          # customer_id from the logged-in session
+    @tool
+    def get_my_cards() -> list[CustomerCard]:
+        """List the customer's cards with status (active, frozen, blocked, expired)."""
+        cards = banking.get_cards(customer_id)       # the LLM never supplies the ID
+        return [CustomerCard.safe(c) for c in cards] # drops fraud-rule details, internal codes
+    ...
+```
+
+**Customer-scoped tools** (the assistant; all read-only):
+
+| Tool | Returns | Hides |
+|---|---|---|
+| `get_my_cards` | cards with status | fraud flags, risk scores |
+| `get_my_recent_declines` | recent declines with a customer-friendly reason ("card frozen", "insufficient funds", "blocked for a security check") | fraud rule IDs, internal codes |
+| `get_my_card_controls` | contactless limit, blocked merchant categories, online payments on or off | |
+| `get_my_scheduled_payments` | standing orders and scheduled payments with their last attempt | internal retry details |
+| `get_my_direct_debits` | mandates and recent collections with status | originator-side internal data |
+| `get_my_balance` | current balance | |
+| `search_knowledge_base` | matching article chunks with title and link | |
+
+There are no action tools in v1 (unfreeze, pay, cancel): the assistant explains how the customer does it in the app and links the article. The **ops-scoped** tools, restricted per investigator, are listed in section 6.
+
+**Not tools.** These run in code, so the LLM can never choose, skip or misuse them:
+
+| What | Why not a tool |
+|---|---|
+| Signal snapshot | Same banking API, but always called by code before triage |
+| Simulation endpoints | They create incidents; the agents must stay read-only |
+| Creating a case on handoff | The graph's `handoff` node does it when a rule fires |
+| Recording a review | Comes from the ops agent's click through the API |
+
+**Signal snapshot.** Before triage, a fixed set of plain API calls (no LLM) summarises what is happening on the account right now: recent card declines with reason codes, failed or skipped scheduled payments, failed direct debit collections, and account and card status (frozen, blocked, closed, low balance). Customers are vague ("my payment didn't work"), so triage categorises from facts as well as words. When they disagree, the facts win: "my rent didn't go out" with no failed scheduled payment but a failed direct debit to the letting agent (`MANDATE_CANCELLED`) is `failed_direct_debit`. Code makes it fast, free and deterministic, and the assistant also uses it as facts for its answer.
+
 Triage itself is one short `triage` call with structured output (category, confidence, optional secondary category, one-line reasoning), grounded by the signal snapshot. Below a confidence threshold it returns `other`.
 
 ## 4. In-app customer assistant
@@ -209,21 +246,39 @@ flowchart TD
     told --> closed([conversation: handed_off])
 ```
 
+- **LLM use per message.** A conversation the assistant resolves on its own uses the LLM the most, because it writes the answer. For "why was my card declined?" with a card the customer froze:
+
+  | Step | LLM? | |
+  |---|---|---|
+  | load context, signal snapshot | no | plain API calls |
+  | input guard | yes, `triage` alias (plus rules) | injection, abuse, off-topic |
+  | triage | yes, `triage` alias | `card_decline`, confidence 0.95 |
+  | handoff rules | no | code; no rule fires |
+  | answer agent | yes, `assistant` alias, usually 1–3 calls | picks `get_my_cards` and `search_knowledge_base`, reads the results, writes a cited answer |
+  | running the tools | no | banking API, pgvector |
+  | output guard | yes, `judge` alias | every claim backed by a source |
+  | respond | no | streams the answer |
+
+  Roughly 4–6 LLM calls per message, mostly on cheap models. With a handoff, the guard, triage and a short summary still use the LLM, but no full answer is written. Everything that must be predictable (snapshot, rules, tools, masking, saving the case) is code. Very common simple questions could later be answered from templates or cached answers without the answer agent.
 - **Answer agent.** A ReAct loop like the investigators, with a playbook per category and a small step budget (a customer is waiting). It can call `search_knowledge_base` and the customer-scoped banking tools, and must cite which source backs each statement.
 - **Resolution.** A conversation is `resolved` when the customer confirms the answer helped, or when it goes quiet after an answer and no new conversation or case about the same issue follows within 7 days. Otherwise it ends `handed_off` or `abandoned`.
 - **Streaming.** The final answer is streamed token by token to the app (unlike the ops copilot, the customer-facing answer is the main output).
 
 ### Handoff rules
 
-The assistant hands off when any of these is true:
+The assistant hands off when any of these is true. The rules are checked by code after triage and before answering:
 
-| Rule | Example |
-|---|---|
-| The customer asks for a human | "Can I talk to someone?" |
-| Sensitive topic | suspected fraud, a vulnerable customer, a formal complaint, bereavement |
-| The fix needs a human action | a fraud block that only ops can lift, a refund decision |
-| Low confidence | triage confidence below threshold, or the evidence does not explain the problem |
-| Repeated failure | the output guard rejected two answers, or the customer said "that didn't help" twice |
+| Rule | Example | Why |
+|---|---|---|
+| The customer asks for a human | "Can I talk to someone?" | never trap a customer with a bot |
+| Sensitive topic | suspected fraud, a vulnerable customer, a formal complaint, bereavement | needs human judgment, often with regulatory duties |
+| The fix needs a human action | a fraud block that only ops can lift, a refund decision | the assistant is read-only, so explaining is not enough |
+| Low confidence | triage confidence below threshold, or the evidence does not explain the problem | better to hand off than to guess |
+| Repeated failure | the output guard rejected two answers, or the customer said "that didn't help" twice | stop going round in circles |
+
+Example: "why was my card declined?" with a card the customer froze in the app → no rule fires, the assistant explains how to unfreeze it and links the article. The same question with a card blocked by a fraud rule → "needs a human action" fires, and the case arrives with category, transcript, summary and evidence.
+
+The rules are code, not "use your judgment" in the prompt, so they are **predictable** (a persuasive customer cannot talk the assistant out of handing off a fraud case), **testable** (a unit test checks the fraud scenario always hands off) and **measurable** (simulated incidents carry `self_serve` or `needs_human`, so wrong decisions in both directions show up in "correct handoff decisions"). Together with the containment rate, this is the balance: resolve as much as possible, never at the cost of mishandling sensitive or unsolvable cases.
 
 The handoff creates a case with `source = assistant_handoff`, the **category**, the **conversation transcript**, a short **summary**, and the **evidence** already gathered. The ops copilot starts from there (section 5).
 
@@ -894,3 +949,15 @@ Mostly our own Python plus the Langfuse SDK:
 - **The gate**: `make eval PROFILE=…` runs it, and a pytest check fails CI if any average score is below its threshold in a config file.
 
 Optional libraries: DeepEval (ready-made answer-quality metrics in pytest style) or RAGAS (retrieval metrics for the knowledge base) if our groundedness judge is not enough; promptfoo for quick prompt and model A/B tests; Inspect AI or LangSmith's evaluate as alternatives that overlap with Langfuse. Most of the work is in the scenarios and the per-item setup, not the library.
+
+**What is the signal snapshot?**
+A quick summary of the account's current state (recent declines with reason codes, failed scheduled payments, failed direct debits, card and account status), fetched with plain API calls before triage. Triage then categorises from facts, not only from the customer's often vague words, and the facts win when they disagree. It uses no LLM because it is the same fixed set of lookups every time: fast, free and deterministic.
+
+**What are the handoff rules, and why are they code?**
+The conditions under which the assistant passes a conversation to a human: the customer asks, a sensitive topic, a fix that needs a human action, low confidence, or repeated failure. They are checked by code after triage, so they cannot be argued away, can be unit-tested, and are measured against each simulated incident's expected outcome. A handoff creates a case with the category, transcript, summary and evidence, so the ops copilot starts from there.
+
+**Does the assistant use an LLM when no human is involved?**
+Yes, the most: input guard and triage (`triage` alias), the answer agent that picks tools and writes a cited answer (`assistant` alias, usually 1–3 calls) and the output guard (`judge` alias), roughly 4–6 mostly cheap calls per message. The snapshot, handoff rules, running the tools, masking and saving cases are code.
+
+**Where do the tools live, and which ones does each agent use?**
+In `agent-service/core/tools/`: ops-scoped banking tools, customer-scoped wrappers around the same client, and knowledge base search. Banking tools call the banking service's read-only REST API. The assistant gets customer-scoped tools (`get_my_cards`, `get_my_recent_declines`, `get_my_card_controls`, `get_my_scheduled_payments`, `get_my_direct_debits`, `get_my_balance`, `search_knowledge_base`), with `customer_id` injected from the session and only customer-safe fields returned. Each copilot investigator gets only the ops-scoped tools for its issue type, with full records. Nothing that changes data is a tool: the snapshot, simulation, case creation and reviews are all code.
