@@ -1,0 +1,776 @@
+openapi: 3.1.0
+info:
+  title: Banking Data Service API
+  version: 0.1.0
+  summary: Mock core banking for the payments support POC.
+  description: |
+    Read-only API behind the agents' banking tools and the signal snapshot, plus the
+    simulation module that creates incidents (only with the Spring profile `simulation`).
+
+    - Every customer-owned resource is nested under `/customers/{customer_id}`, so the
+      service itself checks ownership: an id that belongs to another customer is a 404.
+    - JSON uses `snake_case`. Money is a decimal string with two places (`"12.50"`), in
+      the account's currency. Timestamps are RFC 3339 UTC.
+    - Lists are newest first and return at most `limit` items.
+    - Responses are the full (ops-scoped) records. The agent service derives the
+      customer-safe views; fields marked "internal" must never reach a customer.
+
+    Tool → endpoint map (architecture sections 3 and 6):
+
+    | Tool | Endpoint |
+    |---|---|
+    | `get_cards`, `get_my_cards` | `GET /customers/{customer_id}/cards` |
+    | `get_card_authorisations`, `get_my_recent_declines` | `GET /customers/{customer_id}/authorisations` |
+    | `get_account_balance`, `get_my_balance` | `GET /customers/{customer_id}/accounts/{account_id}/balance` (account ids from `GET /customers/{customer_id}/accounts`) |
+    | `get_card_controls`, `get_my_card_controls` | `GET /customers/{customer_id}/cards/{card_id}/controls` |
+    | `get_fraud_flags` | `GET /customers/{customer_id}/fraud-flags` |
+    | `get_scheduled_payments`, `get_my_scheduled_payments` | `GET /customers/{customer_id}/scheduled-payments` |
+    | `get_payment_attempts` | `GET /customers/{customer_id}/payment-attempts` |
+    | `get_transactions` | `GET /customers/{customer_id}/accounts/{account_id}/transactions` |
+    | `get_payee` | `GET /customers/{customer_id}/payees/{payee_id}` |
+    | `get_mandates`, `get_my_direct_debits` | `GET /customers/{customer_id}/mandates` |
+    | `get_direct_debit_collections`, `get_my_direct_debits` | `GET /customers/{customer_id}/direct-debit-collections` |
+    | Signal snapshot (code, not a tool) | `GET /customers/{customer_id}`, `.../accounts`, `.../cards`, `.../authorisations?result=declined`, `.../payment-attempts?result=failed`, `.../direct-debit-collections?result=failed` |
+    | Simulation (code, never a tool) | `POST /simulation/incidents` |
+  license:
+    name: Proprietary (POC)
+    identifier: LicenseRef-POC
+servers:
+  - url: http://localhost:8080
+    description: Local (Docker Compose or native)
+tags:
+  - name: customers
+    description: Customers (seeded and simulated).
+  - name: accounts
+    description: Accounts, balances and booked transactions.
+  - name: cards
+    description: Cards, controls, authorisations and fraud flags.
+  - name: payments
+    description: Standing orders, scheduled payments, attempts and payees.
+  - name: direct-debits
+    description: Direct debit mandates and collections.
+  - name: simulation
+    description: Only available with the Spring profile `simulation`. Never exposed to the agents as a tool.
+
+paths:
+  /customers:
+    get:
+      tags: [customers]
+      operationId: listCustomers
+      summary: List customers
+      description: Used by the agent service for the "log in as" picker and the new case form.
+      responses:
+        '200':
+          description: All customers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Customer' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /customers/{customer_id}:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [customers]
+      operationId: getCustomer
+      summary: Get a customer
+      responses:
+        '200':
+          description: The customer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Customer' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/accounts:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [accounts]
+      operationId: listAccounts
+      summary: List the customer's accounts
+      responses:
+        '200':
+          description: Accounts with their current balance.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Account' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/accounts/{account_id}/balance:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [accounts]
+      operationId: getAccountBalance
+      summary: Get an account's balance
+      responses:
+        '200':
+          description: Current and available balance.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Balance' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/accounts/{account_id}/transactions:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [accounts]
+      operationId: listTransactions
+      summary: List booked transactions on an account
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Transactions, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Transaction' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/cards:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [cards]
+      operationId: listCards
+      summary: List the customer's cards
+      responses:
+        '200':
+          description: Cards with their status.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Card' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/cards/{card_id}/controls:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+      - $ref: '#/components/parameters/CardId'
+    get:
+      tags: [cards]
+      operationId: getCardControls
+      summary: Get a card's controls
+      responses:
+        '200':
+          description: Contactless limit, blocked merchant categories, online payments.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardControls' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/authorisations:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [cards]
+      operationId: listCardAuthorisations
+      summary: List card authorisations across the customer's cards
+      parameters:
+        - name: card_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: result
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/AuthorisationResult' }
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Authorisations, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CardAuthorisation' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/fraud-flags:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [cards]
+      operationId: listFraudFlags
+      summary: List fraud flags (internal)
+      description: Ops-scoped only. No customer-scoped tool may expose these.
+      parameters:
+        - name: card_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/FraudFlagStatus' }
+      responses:
+        '200':
+          description: Fraud flags, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/FraudFlag' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/scheduled-payments:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [payments]
+      operationId: listScheduledPayments
+      summary: List standing orders and scheduled payments
+      responses:
+        '200':
+          description: Scheduled payments with their last attempt.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScheduledPayment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/payment-attempts:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [payments]
+      operationId: listPaymentAttempts
+      summary: List execution attempts of scheduled payments
+      parameters:
+        - name: scheduled_payment_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: result
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/PaymentAttemptResult' }
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Attempts, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PaymentAttempt' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/payees:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [payments]
+      operationId: listPayees
+      summary: List the customer's payees
+      responses:
+        '200':
+          description: Payees.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Payee' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/payees/{payee_id}:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+      - name: payee_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [payments]
+      operationId: getPayee
+      summary: Get a payee, including the status of the payee's account
+      responses:
+        '200':
+          description: The payee.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payee' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/mandates:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [direct-debits]
+      operationId: listMandates
+      summary: List direct debit mandates
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/MandateStatus' }
+      responses:
+        '200':
+          description: Mandates.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Mandate' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customer_id}/direct-debit-collections:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      tags: [direct-debits]
+      operationId: listDirectDebitCollections
+      summary: List direct debit collections across the customer's mandates
+      parameters:
+        - name: mandate_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: result
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/CollectionResult' }
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Collections, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DirectDebitCollection' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /simulation/incidents:
+    post:
+      tags: [simulation]
+      operationId: createIncident
+      summary: Create an incident through the real domain rules
+      description: |
+        Sets up a fresh situation for a customer (an existing seeded one or a new test
+        customer) using the service's own domain operations, then lets the normal rules
+        produce the outcome (for example: freeze the card, then authorise card payments,
+        which the rules decline with `CARD_FROZEN`).
+
+        The response contains the answer key (`expected_root_cause`, `expected_outcome`).
+        The agent service stores it for scoring only; it must never reach an agent, a
+        tool, a prompt or the ops console.
+
+        Returns 404 when the service runs without the `simulation` profile.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IncidentRequest' }
+      responses:
+        '201':
+          description: The incident was created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Incident' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  parameters:
+    CustomerId:
+      name: customer_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AccountId:
+      name: account_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CardId:
+      name: card_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Since:
+      name: since
+      in: query
+      required: false
+      description: Only items at or after this time.
+      schema: { type: string, format: date-time }
+    Until:
+      name: until
+      in: query
+      required: false
+      description: Only items before this time.
+      schema: { type: string, format: date-time }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  responses:
+    NotFound:
+      description: Not found, or not owned by this customer.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Money:
+      type: string
+      pattern: '^-?\d+\.\d{2}$'
+      examples: ['12.50']
+    Currency:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      examples: [GBP]
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+
+    Customer:
+      type: object
+      required: [id, name, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        status: { $ref: '#/components/schemas/CustomerStatus' }
+        vulnerable:
+          type: boolean
+          default: false
+          description: Internal. Marks a vulnerable customer (a sensitive-topic handoff signal).
+        created_at: { type: string, format: date-time }
+    CustomerStatus:
+      type: string
+      enum: [active, restricted, closed]
+
+    Account:
+      type: object
+      required: [id, customer_id, sort_code, account_number, currency, balance, overdraft_limit, status]
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        name: { type: string, examples: [Current account] }
+        sort_code: { type: string, pattern: '^\d{2}-\d{2}-\d{2}$', description: Sensitive; mask before an LLM. }
+        account_number: { type: string, pattern: '^\d{8}$', description: Sensitive; mask before an LLM. }
+        currency: { $ref: '#/components/schemas/Currency' }
+        balance: { $ref: '#/components/schemas/Money' }
+        overdraft_limit: { $ref: '#/components/schemas/Money' }
+        status: { $ref: '#/components/schemas/AccountStatus' }
+    AccountStatus:
+      type: string
+      enum: [active, frozen, closed]
+
+    Balance:
+      type: object
+      required: [account_id, currency, current, available, overdraft_limit, as_of]
+      properties:
+        account_id: { type: string, format: uuid }
+        currency: { $ref: '#/components/schemas/Currency' }
+        current: { $ref: '#/components/schemas/Money' }
+        available:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: Current balance plus overdraft, minus pending authorisations.
+        overdraft_limit: { $ref: '#/components/schemas/Money' }
+        as_of: { type: string, format: date-time }
+
+    Transaction:
+      type: object
+      required: [id, account_id, amount, currency, type, description, booked_at]
+      properties:
+        id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        amount:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: Negative for money out.
+        currency: { $ref: '#/components/schemas/Currency' }
+        type: { $ref: '#/components/schemas/TransactionType' }
+        description: { type: string }
+        reference_id:
+          type: [string, 'null']
+          format: uuid
+          description: The authorisation, payment attempt or collection that produced it.
+        booked_at: { type: string, format: date-time }
+    TransactionType:
+      type: string
+      enum: [card_payment, scheduled_payment, direct_debit, transfer_in, transfer_out, fee, refund]
+
+    Card:
+      type: object
+      required: [id, account_id, last4, status, expiry]
+      properties:
+        id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        last4: { type: string, pattern: '^\d{4}$' }
+        pan:
+          type: string
+          pattern: '^\d{16}$'
+          description: Full card number. Sensitive; must be masked before an LLM or Langfuse.
+        brand: { type: string, enum: [visa, mastercard] }
+        status: { $ref: '#/components/schemas/CardStatus' }
+        status_reason:
+          oneOf:
+            - { $ref: '#/components/schemas/CardStatusReason' }
+            - { type: 'null' }
+        expiry: { type: string, format: date, description: Last day the card is valid. }
+    CardStatus:
+      type: string
+      enum: [active, frozen, blocked, expired]
+    CardStatusReason:
+      type: string
+      description: Internal. Why a card is not active.
+      enum: [FROZEN_BY_CUSTOMER, FRAUD_SUSPECTED, LOST_OR_STOLEN, EXPIRED]
+
+    CardControls:
+      type: object
+      required: [card_id, contactless_limit, blocked_merchant_categories, online_payments_enabled]
+      properties:
+        card_id: { type: string, format: uuid }
+        contactless_limit: { $ref: '#/components/schemas/Money' }
+        blocked_merchant_categories:
+          type: array
+          description: ISO 18245 merchant category codes the customer blocked.
+          items: { type: string, pattern: '^\d{4}$' }
+        online_payments_enabled: { type: boolean }
+
+    CardAuthorisation:
+      type: object
+      required: [id, card_id, amount, currency, merchant_name, merchant_mcc, channel, result, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        card_id: { type: string, format: uuid }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        merchant_name: { type: string }
+        merchant_mcc: { type: string, pattern: '^\d{4}$' }
+        channel: { type: string, enum: [chip_and_pin, contactless, online] }
+        result: { $ref: '#/components/schemas/AuthorisationResult' }
+        decline_reason:
+          oneOf:
+            - { $ref: '#/components/schemas/DeclineReason' }
+            - { type: 'null' }
+        fraud_rule_id:
+          type: [string, 'null']
+          description: Internal. Set when decline_reason is FRAUD_RULE_TRIGGERED.
+          examples: [FR-12]
+        created_at: { type: string, format: date-time }
+    AuthorisationResult:
+      type: string
+      enum: [approved, declined]
+    DeclineReason:
+      type: string
+      enum:
+        - CARD_FROZEN
+        - CARD_BLOCKED
+        - CARD_EXPIRED
+        - INSUFFICIENT_FUNDS
+        - CONTACTLESS_LIMIT_EXCEEDED
+        - MERCHANT_CATEGORY_BLOCKED
+        - ONLINE_PAYMENTS_DISABLED
+        - FRAUD_RULE_TRIGGERED
+        - ACCOUNT_NOT_ACTIVE
+
+    FraudFlag:
+      type: object
+      description: Internal.
+      required: [id, customer_id, rule_id, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        card_id: { type: [string, 'null'], format: uuid }
+        rule_id: { type: string, examples: [FR-12] }
+        description: { type: string }
+        risk_score: { type: number, minimum: 0, maximum: 1 }
+        status: { $ref: '#/components/schemas/FraudFlagStatus' }
+        action: { type: string, enum: [card_blocked, review_only] }
+        created_at: { type: string, format: date-time }
+        cleared_at: { type: [string, 'null'], format: date-time }
+    FraudFlagStatus:
+      type: string
+      enum: [open, cleared, confirmed_fraud]
+
+    ScheduledPayment:
+      type: object
+      required: [id, account_id, payee_id, amount, currency, frequency, next_run, status]
+      properties:
+        id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        payee_id: { type: string, format: uuid }
+        payee_name: { type: string }
+        reference: { type: string }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        frequency: { type: string, enum: [once, weekly, monthly] }
+        next_run: { type: string, format: date }
+        status: { type: string, enum: [active, paused, cancelled, completed] }
+        last_attempt:
+          oneOf:
+            - { $ref: '#/components/schemas/PaymentAttempt' }
+            - { type: 'null' }
+
+    PaymentAttempt:
+      type: object
+      required: [id, scheduled_payment_id, result, attempted_at]
+      properties:
+        id: { type: string, format: uuid }
+        scheduled_payment_id: { type: string, format: uuid }
+        amount: { $ref: '#/components/schemas/Money' }
+        result: { $ref: '#/components/schemas/PaymentAttemptResult' }
+        failure_reason:
+          oneOf:
+            - { $ref: '#/components/schemas/PaymentFailureReason' }
+            - { type: 'null' }
+        retry_count:
+          type: integer
+          minimum: 0
+          description: Internal retry details.
+        attempted_at: { type: string, format: date-time }
+    PaymentAttemptResult:
+      type: string
+      enum: [succeeded, failed, skipped]
+    PaymentFailureReason:
+      type: string
+      enum:
+        - INSUFFICIENT_FUNDS
+        - DAILY_PAYMENT_LIMIT_EXCEEDED
+        - PAYEE_ACCOUNT_CLOSED
+        - INVALID_PAYEE_DETAILS
+        - ACCOUNT_NOT_ACTIVE
+
+    Payee:
+      type: object
+      required: [id, customer_id, name, sort_code, account_number, account_status]
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        name: { type: string }
+        sort_code: { type: string, pattern: '^\d{2}-\d{2}-\d{2}$', description: Sensitive. }
+        account_number: { type: string, pattern: '^\d{8}$', description: Sensitive. }
+        account_status:
+          type: string
+          enum: [open, closed, unknown]
+          description: Status of the payee's account at the receiving bank.
+
+    Mandate:
+      type: object
+      required: [id, account_id, originator, reference, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        originator: { type: string, examples: [Acme Lettings] }
+        reference: { type: string }
+        status: { $ref: '#/components/schemas/MandateStatus' }
+        cancelled_by:
+          type: [string, 'null']
+          enum: [customer, originator, bank, null]
+        created_at: { type: string, format: date-time }
+        cancelled_at: { type: [string, 'null'], format: date-time }
+    MandateStatus:
+      type: string
+      enum: [active, cancelled, dormant]
+
+    DirectDebitCollection:
+      type: object
+      required: [id, mandate_id, amount, currency, due_date, result]
+      properties:
+        id: { type: string, format: uuid }
+        mandate_id: { type: string, format: uuid }
+        originator: { type: string }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        due_date: { type: string, format: date }
+        result: { $ref: '#/components/schemas/CollectionResult' }
+        failure_code:
+          oneOf:
+            - { $ref: '#/components/schemas/CollectionFailureCode' }
+            - { type: 'null' }
+        processed_at: { type: [string, 'null'], format: date-time }
+    CollectionResult:
+      type: string
+      enum: [pending, collected, failed]
+    CollectionFailureCode:
+      type: string
+      enum:
+        - MANDATE_CANCELLED
+        - NO_MANDATE
+        - INSUFFICIENT_FUNDS
+        - ACCOUNT_CLOSED_BY_ORIGINATOR
+        - PAYER_ACCOUNT_CLOSED
+
+    IncidentRequest:
+      type: object
+      properties:
+        type:
+          $ref: './scenario.schema.json#/$defs/IssueType'
+        root_cause:
+          $ref: './scenario.schema.json#/$defs/RootCause'
+        customer_id:
+          type: string
+          format: uuid
+          description: Use this seeded customer; by default a fresh test customer is created.
+        params:
+          type: object
+          description: Scenario-specific settings (see `Incident.params` in scenario.schema.json).
+      description: |
+        All fields optional. Without `type` a random scenario type is chosen; without
+        `root_cause` a random root cause of that type. `type: other` is rejected (400).
+
+    Incident:
+      type: object
+      required: [incident_id, issue_type, customer_id, customer_name, persona_hints, customer_knowledge, expected_root_cause, expected_outcome, created_at]
+      properties:
+        incident_id: { type: string, format: uuid }
+        issue_type: { $ref: './scenario.schema.json#/$defs/IssueType' }
+        customer_id: { type: string, format: uuid }
+        customer_name: { type: string }
+        persona_hints:
+          type: object
+          description: Suggested persona for the simulated customer (shape of `Persona` in scenario.schema.json).
+        customer_knowledge:
+          type: array
+          description: What the customer would know and say. Never the root cause unless a real customer would know it.
+          items: { type: string }
+        complaint:
+          type: string
+          description: A suggested email complaint, for Simulate email complaint.
+        affected:
+          type: object
+          description: Ids of the records the incident touched, for tests and debugging.
+          properties:
+            card_id: { type: string, format: uuid }
+            account_id: { type: string, format: uuid }
+            scheduled_payment_id: { type: string, format: uuid }
+            mandate_id: { type: string, format: uuid }
+        expected_root_cause:
+          $ref: './scenario.schema.json#/$defs/RootCause'
+        expected_outcome:
+          $ref: './scenario.schema.json#/$defs/ExpectedOutcome'
+        created_at: { type: string, format: date-time }

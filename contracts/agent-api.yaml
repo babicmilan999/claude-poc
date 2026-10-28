@@ -1,0 +1,1227 @@
+openapi: 3.1.0
+info:
+  title: Agent Service API
+  version: 0.1.0
+  summary: Customer assistant, cases, investigations and simulation.
+  description: |
+    The API both Angular apps use. The agent service is the only backend the
+    front-ends call; it calls the banking service and LiteLLM itself.
+
+    **Conventions**
+    - JSON uses `snake_case`. Timestamps are RFC 3339 UTC. Errors are `application/problem+json`.
+    - Customer endpoints identify the customer by the `X-Customer-Id` header, set by the
+      customer app's "log in as" picker (local development only, no real authentication).
+      Ops endpoints have no authentication in the POC.
+    - Simulation answer keys (`expected_root_cause`, `expected_outcome`) are stored by the
+      service for scoring but are **never returned by any endpoint** of this API.
+
+    **Server-Sent Events**
+    Streams use `text/event-stream`. Each SSE message has `event:` set to the event
+    `type`, `id:` set to the event `id` (where the stream is resumable) and one line of
+    `data:` holding the JSON event object documented as the stream's schema. Resumable
+    streams accept the standard `Last-Event-ID` header: stored events after that id are
+    replayed, then the stream continues live. The customer chat stream is the response
+    to a POST, so the customer app reads it with a fetch-based SSE client.
+
+    **Screen → endpoint map**
+
+    | App | Screen | Endpoints |
+    |---|---|---|
+    | customer-app | Log in as | `GET /customers` |
+    | customer-app | Account view | `GET /me/overview` |
+    | customer-app | Chat | `POST /conversations`, `GET /conversations/{id}`, `POST /conversations/{id}/messages` (SSE), `PUT /conversations/{id}/messages/{message_id}/rating` |
+    | customer-app | Watch mode | `GET /conversations?simulated=true&status=open`, `GET /conversations/{id}`, `GET /conversations/{id}/events` (SSE) |
+    | ops-console | Case queue | `GET /cases`, `GET /cases/events` (SSE), `POST /simulation/customers`, `POST /simulation/emails` |
+    | ops-console | Case detail | `GET /cases/{id}`, `GET /investigations/{id}`, `GET /investigations/{id}/events` (SSE or JSON), `POST /investigations/{id}/feedback`, `POST /cases/{id}/investigate`, `POST /cases/{id}/reinvestigate` |
+    | ops-console | Conversations | `GET /conversations`, `GET /conversations/{id}` |
+    | ops-console | New case form | `GET /customers`, `POST /cases` |
+  license:
+    name: Proprietary (POC)
+    identifier: LicenseRef-POC
+servers:
+  - url: http://localhost:8000
+    description: Local (Docker Compose or native)
+tags:
+  - name: customers
+    description: Customer list and the logged-in customer's own view.
+  - name: conversations
+    description: The in-app assistant.
+  - name: cases
+    description: Cases waiting for the ops team.
+  - name: investigations
+    description: Runs of the ops copilot on a case, and their review.
+  - name: simulation
+    description: Simulated customers and complaints. Only with `SIMULATION_ENABLED=true`; otherwise 404.
+  - name: health
+    description: Liveness.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Liveness check
+      responses:
+        '200':
+          description: The service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  llm_profile: { type: string, examples: [ollama] }
+        '503': { $ref: '#/components/responses/Problem' }
+
+  /customers:
+    get:
+      tags: [customers]
+      operationId: listCustomers
+      summary: List customers
+      description: For the customer app's "log in as" picker and the ops console's new case form.
+      responses:
+        '200':
+          description: Customers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CustomerSummary' }
+        '502': { $ref: '#/components/responses/Problem' }
+
+  /me/overview:
+    get:
+      tags: [customers]
+      operationId: getMyOverview
+      summary: The logged-in customer's account view
+      description: Customer-safe fields only (no fraud flags, internal codes or full card numbers).
+      parameters:
+        - $ref: '#/components/parameters/CustomerHeader'
+      responses:
+        '200':
+          description: Accounts, cards and recent transactions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomerOverview' }
+        '401': { $ref: '#/components/responses/Problem' }
+
+  /conversations:
+    post:
+      tags: [conversations]
+      operationId: createConversation
+      summary: Start a conversation with the assistant
+      parameters:
+        - $ref: '#/components/parameters/CustomerHeader'
+      responses:
+        '201':
+          description: The new conversation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '401': { $ref: '#/components/responses/Problem' }
+    get:
+      tags: [conversations]
+      operationId: listConversations
+      summary: List conversations
+      description: Ops console spot checks, and the customer app's watch mode (`simulated=true&status=open`).
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/ConversationStatus' }
+        - name: outcome
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/ConversationOutcome' }
+        - name: simulated
+          in: query
+          required: false
+          schema: { type: boolean }
+        - name: customer_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Conversations, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationPage' }
+        '400': { $ref: '#/components/responses/Problem' }
+
+  /conversations/{conversation_id}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [conversations]
+      operationId: getConversation
+      summary: Get a conversation with its messages
+      responses:
+        '200':
+          description: The conversation and its transcript.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationDetail' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /conversations/{conversation_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [conversations]
+      operationId: sendMessage
+      summary: Send a customer message; the reply streams back
+      description: |
+        Runs the assistant graph once for this message. The response is an SSE stream
+        (not resumable) that typically emits `message_created` (the customer's message),
+        `token`* (the answer), `sources`, `message_completed` (the assistant's message),
+        and on a handoff `handoff` and `conversation_status`. Only `open` conversations
+        accept messages (409 otherwise). The same events are also published on
+        `GET /conversations/{id}/events` for watch mode.
+      parameters:
+        - $ref: '#/components/parameters/CustomerHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+      responses:
+        '200':
+          description: SSE stream of `ChatEvent` objects.
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/ChatEvent' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /conversations/{conversation_id}/messages/{message_id}/rating:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+      - name: message_id
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    put:
+      tags: [conversations]
+      operationId: rateMessage
+      summary: Rate an assistant answer (👍 / 👎)
+      description: |
+        `up` counts as the customer confirming the answer helped (the conversation
+        becomes `resolved`). `down` counts as "that didn't help"; a second one triggers
+        the repeated-failure handoff rule on the next message.
+      parameters:
+        - $ref: '#/components/parameters/CustomerHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { $ref: '#/components/schemas/Rating' }
+      responses:
+        '200':
+          description: The updated message.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: Only assistant messages can be rated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /conversations/{conversation_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [conversations]
+      operationId: streamConversationEvents
+      summary: Follow a conversation live (watch mode)
+      description: Resumable SSE stream of every `ChatEvent` in the conversation, from the start or after `Last-Event-ID`.
+      parameters:
+        - $ref: '#/components/parameters/LastEventId'
+      responses:
+        '200':
+          description: SSE stream of `ChatEvent` objects.
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/ChatEvent' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /cases:
+    get:
+      tags: [cases]
+      operationId: listCases
+      summary: The case queue
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: One or more statuses. Default is every status except `resolved`.
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/CaseStatus' }
+        - name: source
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/CaseSource' }
+        - name: category
+          in: query
+          required: false
+          schema: { $ref: './scenario.schema.json#/$defs/IssueType' }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Cases, oldest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CasePage' }
+        '400': { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [cases]
+      operationId: createCase
+      summary: Create a case (new case form)
+      description: |
+        Inserts the case and a `queued` investigation in one transaction, then wakes the
+        workers. Issue types not in `AUTO_INVESTIGATE_TYPES` stop after triage as `needs_manual`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCaseRequest' }
+      responses:
+        '201':
+          description: The new case, with its queued investigation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /cases/events:
+    get:
+      tags: [cases]
+      operationId: streamCaseEvents
+      summary: Case queue updates
+      description: Resumable SSE stream of `CaseEvent` objects. Without `Last-Event-ID` it starts live (no replay).
+      parameters:
+        - $ref: '#/components/parameters/LastEventId'
+      responses:
+        '200':
+          description: SSE stream of `CaseEvent` objects.
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/CaseEvent' }
+        '400': { $ref: '#/components/responses/Problem' }
+
+  /cases/{case_id}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    get:
+      tags: [cases]
+      operationId: getCase
+      summary: Case detail
+      responses:
+        '200':
+          description: The case, the handed-off conversation and evidence, and all its investigations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CaseDetail' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /cases/{case_id}/investigate:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [cases]
+      operationId: investigateCase
+      summary: Investigate (manual run)
+      description: |
+        Queues a `manual` investigation, which is never parked. If an investigation of this
+        case is already `queued` or `running`, returns it instead (200).
+      responses:
+        '200':
+          description: The already active investigation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Investigation' }
+        '201':
+          description: A new queued investigation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Investigation' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: The case is resolved.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /cases/{case_id}/reinvestigate:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [cases]
+      operationId: reinvestigateCase
+      summary: Re-investigate from scratch
+      description: |
+        Starts a **new** investigation (new LangGraph thread) on the same case. An earlier
+        investigation still `awaiting_review` becomes `superseded`. Rejected with 409 while
+        one is `queued` or `running`.
+      responses:
+        '201':
+          description: The new queued investigation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Investigation' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /investigations/{investigation_id}:
+    parameters:
+      - $ref: '#/components/parameters/InvestigationId'
+    get:
+      tags: [investigations]
+      operationId: getInvestigation
+      summary: Get an investigation
+      responses:
+        '200':
+          description: Status, diagnosis or escalation, evidence and review.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Investigation' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /investigations/{investigation_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/InvestigationId'
+    get:
+      tags: [investigations]
+      operationId: getInvestigationEvents
+      summary: The investigation timeline (live or replayed)
+      description: |
+        With `Accept: text/event-stream`: replays stored events (after `Last-Event-ID` if
+        given), then streams live ones until the run stops (`awaiting_review`, `completed`,
+        `failed` or `superseded`), then closes. With `Accept: application/json`: the stored
+        events as a list, for finished runs.
+      parameters:
+        - $ref: '#/components/parameters/LastEventId'
+        - name: after_id
+          in: query
+          required: false
+          description: JSON variant only. Return events with an id greater than this.
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: The timeline.
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/InvestigationEvent' }
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/InvestigationEvent' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /investigations/{investigation_id}/feedback:
+    parameters:
+      - $ref: '#/components/parameters/InvestigationId'
+    post:
+      tags: [investigations]
+      operationId: submitFeedback
+      summary: Review a diagnosis (accept, correct, reject with hint)
+      description: |
+        Resumes the investigation's `interrupt()`. `accepted` and `corrected` finalize it
+        (investigation `completed`, case `resolved`). `rejected` resumes the **same**
+        thread with the hint in its state (investigation `running`, case `investigating`).
+        Only allowed while the investigation is `awaiting_review` (409 otherwise).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FeedbackRequest' }
+      responses:
+        '202':
+          description: Feedback recorded; the investigation resumes in the background.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Investigation' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /simulation/customers:
+    post:
+      tags: [simulation]
+      operationId: simulateCustomer
+      summary: Simulate customer (the full journey)
+      description: |
+        Creates an incident in the banking service, then starts a simulated customer that
+        chats with the assistant through this API in the background. Follow it with
+        `GET /conversations/{id}/events`. Returns 404 unless `SIMULATION_ENABLED=true`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SimulationRequest' }
+      responses:
+        '202':
+          description: The simulation started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimulatedCustomer' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '502': { $ref: '#/components/responses/Problem' }
+
+  /simulation/emails:
+    post:
+      tags: [simulation]
+      operationId: simulateEmail
+      summary: Simulate email complaint
+      description: |
+        Creates an incident and a case with `source = simulated_email` and no category,
+        which is investigated automatically. Returns 404 unless `SIMULATION_ENABLED=true`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SimulationRequest' }
+      responses:
+        '201':
+          description: The new case.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '502': { $ref: '#/components/responses/Problem' }
+
+components:
+  parameters:
+    CustomerHeader:
+      name: X-Customer-Id
+      in: header
+      required: true
+      description: The logged-in customer (dev-only "log in as"). The server injects it into customer-scoped tools.
+      schema: { type: string, format: uuid }
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CaseId:
+      name: case_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    InvestigationId:
+      name: investigation_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: Resume after this event id.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  responses:
+    Problem:
+      description: Error.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+
+    Money:
+      type: string
+      pattern: '^-?\d+\.\d{2}$'
+      examples: ['12.50']
+
+    # --- customers ---------------------------------------------------------
+    CustomerSummary:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        simulated: { type: boolean, default: false, description: Created by a simulation. }
+
+    CustomerOverview:
+      type: object
+      required: [customer, accounts, cards, recent_transactions]
+      properties:
+        customer: { $ref: '#/components/schemas/CustomerSummary' }
+        accounts:
+          type: array
+          items:
+            type: object
+            required: [id, name, masked_account_number, currency, balance, status]
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              masked_account_number: { type: string, examples: ['****1234'] }
+              currency: { type: string, examples: [GBP] }
+              balance: { $ref: '#/components/schemas/Money' }
+              status: { type: string, enum: [active, frozen, closed] }
+        cards:
+          type: array
+          items:
+            type: object
+            required: [id, last4, status, expiry]
+            properties:
+              id: { type: string, format: uuid }
+              last4: { type: string, pattern: '^\d{4}$' }
+              status: { type: string, enum: [active, frozen, blocked, expired] }
+              expiry: { type: string, format: date }
+        recent_transactions:
+          type: array
+          items:
+            type: object
+            required: [id, amount, currency, description, booked_at]
+            properties:
+              id: { type: string, format: uuid }
+              amount: { $ref: '#/components/schemas/Money' }
+              currency: { type: string }
+              description: { type: string }
+              booked_at: { type: string, format: date-time }
+
+    # --- conversations -----------------------------------------------------
+    ConversationStatus:
+      type: string
+      description: '`open` accepts messages; `closed` has an outcome.'
+      enum: [open, closed]
+    ConversationOutcome:
+      type: string
+      enum: [resolved, handed_off, abandoned]
+    Rating:
+      type: string
+      enum: [up, down]
+
+    Conversation:
+      type: object
+      required: [id, customer_id, status, simulated, started_at]
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        customer_name: { type: string }
+        status: { $ref: '#/components/schemas/ConversationStatus' }
+        outcome:
+          oneOf:
+            - { $ref: '#/components/schemas/ConversationOutcome' }
+            - { type: 'null' }
+        category:
+          description: The assistant's latest triage category.
+          oneOf:
+            - { $ref: './scenario.schema.json#/$defs/IssueType' }
+            - { type: 'null' }
+        rating:
+          description: Latest 👍 / 👎 in the conversation.
+          oneOf:
+            - { $ref: '#/components/schemas/Rating' }
+            - { type: 'null' }
+        simulated: { type: boolean }
+        case_id: { type: [string, 'null'], format: uuid, description: Set after a handoff. }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: [string, 'null'], format: date-time }
+
+    ConversationDetail:
+      allOf:
+        - $ref: '#/components/schemas/Conversation'
+        - type: object
+          required: [messages]
+          properties:
+            messages:
+              type: array
+              items: { $ref: '#/components/schemas/Message' }
+
+    ConversationPage:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Conversation' }
+        total: { type: integer, minimum: 0 }
+
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 4000 }
+
+    Message:
+      type: object
+      required: [id, conversation_id, role, content, sources, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        conversation_id: { type: string, format: uuid }
+        role: { type: string, enum: [customer, assistant, system] }
+        content: { type: string }
+        sources:
+          type: array
+          items: { $ref: '#/components/schemas/Source' }
+        rating:
+          oneOf:
+            - { $ref: '#/components/schemas/Rating' }
+            - { type: 'null' }
+        created_at: { type: string, format: date-time }
+
+    Source:
+      type: object
+      description: What backs a statement in an answer, shown as a link or a chip.
+      required: [kind, title]
+      properties:
+        kind: { type: string, enum: [article, account_data] }
+        title: { type: string, examples: [Why cards get declined] }
+        article_id: { type: string, description: Knowledge base article slug (kind = article). }
+        url: { type: string, description: Link to the article (kind = article). }
+        tool: { type: string, description: Customer-scoped tool name (kind = account_data). }
+
+    ChatEvent:
+      description: One event of a conversation stream. `type` is also the SSE event name.
+      oneOf:
+        - $ref: '#/components/schemas/ChatMessageCreatedEvent'
+        - $ref: '#/components/schemas/ChatTokenEvent'
+        - $ref: '#/components/schemas/ChatSourcesEvent'
+        - $ref: '#/components/schemas/ChatMessageCompletedEvent'
+        - $ref: '#/components/schemas/ChatHandoffEvent'
+        - $ref: '#/components/schemas/ChatConversationStatusEvent'
+        - $ref: '#/components/schemas/ChatErrorEvent'
+      discriminator:
+        propertyName: type
+        mapping:
+          message_created: '#/components/schemas/ChatMessageCreatedEvent'
+          token: '#/components/schemas/ChatTokenEvent'
+          sources: '#/components/schemas/ChatSourcesEvent'
+          message_completed: '#/components/schemas/ChatMessageCompletedEvent'
+          handoff: '#/components/schemas/ChatHandoffEvent'
+          conversation_status: '#/components/schemas/ChatConversationStatusEvent'
+          error: '#/components/schemas/ChatErrorEvent'
+    ChatEventBase:
+      type: object
+      required: [id, type, conversation_id, created_at]
+      properties:
+        id: { type: string, description: 'Increasing per conversation; the SSE `id:`.' }
+        type: { type: string }
+        conversation_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    ChatMessageCreatedEvent:
+      description: A complete message was added (the customer's message, or a whole non-streamed assistant message such as a refusal).
+      allOf:
+        - $ref: '#/components/schemas/ChatEventBase'
+        - type: object
+          required: [type, message]
+          properties:
+            type: { const: message_created }
+            message: { $ref: '#/components/schemas/Message' }
+    ChatTokenEvent:
+      description: A piece of the assistant's answer.
+      allOf:
+        - $ref: '#/components/schemas/ChatEventBase'
+        - type: object
+          required: [type, message_id, text]
+          properties:
+            type: { const: token }
+            message_id: { type: integer, format: int64 }
+            text: { type: string }
+    ChatSourcesEvent:
+      allOf:
+        - $ref: '#/components/schemas/ChatEventBase'
+        - type: object
+          required: [type, message_id, sources]
+          properties:
+            type: { const: sources }
+            message_id: { type: integer, format: int64 }
+            sources:
+              type: array
+              items: { $ref: '#/components/schemas/Source' }
+    ChatMessageCompletedEvent:
+      description: The streamed assistant message is complete; it can now be rated.
+      allOf:
+        - $ref: '#/components/schemas/ChatEventBase'
+        - type: object
+          required: [type, message]
+          properties:
+            type: { const: message_completed }
+            message: { $ref: '#/components/schemas/Message' }
+    ChatHandoffEvent:
+      description: The assistant handed off; a case was created.
+      allOf:
+        - $ref: '#/components/schemas/ChatEventBase'
+        - type: object
+          required: [type, case_id, notice]
+          properties:
+            type: { const: handoff }
+            case_id: { type: string, format: uuid }
+            notice: { type: string, examples: ['An agent will look into this and get back to you.'] }
+    ChatConversationStatusEvent:
+      allOf:
+        - $ref: '#/components/schemas/ChatEventBase'
+        - type: object
+          required: [type, status]
+          properties:
+            type: { const: conversation_status }
+            status: { $ref: '#/components/schemas/ConversationStatus' }
+            outcome:
+              oneOf:
+                - { $ref: '#/components/schemas/ConversationOutcome' }
+                - { type: 'null' }
+    ChatErrorEvent:
+      allOf:
+        - $ref: '#/components/schemas/ChatEventBase'
+        - type: object
+          required: [type, message]
+          properties:
+            type: { const: error }
+            message: { type: string }
+
+    # --- cases -------------------------------------------------------------
+    CaseSource:
+      type: string
+      enum: [assistant_handoff, email, phone, ops_manual, simulated_email, event]
+    CaseStatus:
+      type: string
+      enum: [new, investigating, awaiting_review, needs_manual, escalated, resolved]
+
+    Case:
+      type: object
+      required: [id, customer_id, source, status, simulated, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        customer_name: { type: string }
+        conversation_id: { type: [string, 'null'], format: uuid }
+        source: { $ref: '#/components/schemas/CaseSource' }
+        category:
+          description: Set by the assistant on handoff or by the copilot's triage.
+          oneOf:
+            - { $ref: './scenario.schema.json#/$defs/IssueType' }
+            - { type: 'null' }
+        complaint: { type: [string, 'null'] }
+        trigger_payload: { type: [object, 'null'] }
+        summary: { type: [string, 'null'], description: Handoff summary from the assistant. }
+        status: { $ref: '#/components/schemas/CaseStatus' }
+        simulated: { type: boolean }
+        active_investigation_id:
+          type: [string, 'null']
+          format: uuid
+          description: The latest investigation that is not completed, failed or superseded.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CaseDetail:
+      allOf:
+        - $ref: '#/components/schemas/Case'
+        - type: object
+          required: [transcript, handoff_evidence, investigations]
+          properties:
+            transcript:
+              description: The handed-off conversation's messages (empty for other sources).
+              type: array
+              items: { $ref: '#/components/schemas/Message' }
+            handoff_evidence:
+              description: Evidence the assistant gathered before handing off.
+              type: array
+              items: { $ref: '#/components/schemas/Evidence' }
+            investigations:
+              description: All investigations of the case, newest first.
+              type: array
+              items: { $ref: '#/components/schemas/InvestigationSummary' }
+
+    CasePage:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Case' }
+        total: { type: integer, minimum: 0 }
+
+    CreateCaseRequest:
+      type: object
+      required: [customer_id, source]
+      properties:
+        customer_id: { type: string, format: uuid }
+        source:
+          type: string
+          enum: [email, phone, ops_manual]
+        complaint: { type: string, minLength: 1, maxLength: 8000 }
+        trigger_payload: { type: object }
+      description: '`complaint` or `trigger_payload` is required.'
+      anyOf:
+        - required: [complaint]
+        - required: [trigger_payload]
+
+    CaseEvent:
+      description: One case queue update. `type` is also the SSE event name.
+      oneOf:
+        - $ref: '#/components/schemas/CaseCreatedEvent'
+        - $ref: '#/components/schemas/CaseStatusChangedEvent'
+      discriminator:
+        propertyName: type
+        mapping:
+          case_created: '#/components/schemas/CaseCreatedEvent'
+          status_changed: '#/components/schemas/CaseStatusChangedEvent'
+    CaseCreatedEvent:
+      type: object
+      required: [id, type, created_at, case]
+      properties:
+        id: { type: string }
+        type: { const: case_created }
+        created_at: { type: string, format: date-time }
+        case: { $ref: '#/components/schemas/Case' }
+    CaseStatusChangedEvent:
+      type: object
+      required: [id, type, created_at, case_id, status]
+      properties:
+        id: { type: string }
+        type: { const: status_changed }
+        created_at: { type: string, format: date-time }
+        case_id: { type: string, format: uuid }
+        previous_status: { $ref: '#/components/schemas/CaseStatus' }
+        status: { $ref: '#/components/schemas/CaseStatus' }
+        category:
+          oneOf:
+            - { $ref: './scenario.schema.json#/$defs/IssueType' }
+            - { type: 'null' }
+
+    # --- investigations ----------------------------------------------------
+    InvestigationStatus:
+      type: string
+      description: '`queued` rows are the job queue. `superseded`: replaced by a Re-investigate while awaiting review.'
+      enum: [queued, running, awaiting_review, completed, failed, superseded]
+    InvestigationTrigger:
+      type: string
+      enum: [auto, manual]
+
+    InvestigationSummary:
+      type: object
+      required: [id, case_id, trigger, status, queued_at]
+      properties:
+        id: { type: string, format: uuid }
+        case_id: { type: string, format: uuid }
+        trigger: { $ref: '#/components/schemas/InvestigationTrigger' }
+        status: { $ref: '#/components/schemas/InvestigationStatus' }
+        issue_type:
+          oneOf:
+            - { $ref: './scenario.schema.json#/$defs/IssueType' }
+            - { type: 'null' }
+        verdict:
+          oneOf:
+            - { $ref: '#/components/schemas/Verdict' }
+            - { type: 'null' }
+        queued_at: { type: string, format: date-time }
+        started_at: { type: [string, 'null'], format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+
+    Investigation:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationSummary'
+        - type: object
+          required: [steps_used, evidence]
+          properties:
+            attempts: { type: integer, minimum: 0, description: Worker attempts (retries after a crash). }
+            steps_used: { type: integer, minimum: 0 }
+            category_changed:
+              type: boolean
+              description: Verification changed the assistant's category.
+            evidence:
+              type: array
+              items: { $ref: '#/components/schemas/Evidence' }
+            diagnosis:
+              oneOf:
+                - { $ref: '#/components/schemas/Diagnosis' }
+                - { type: 'null' }
+            escalation:
+              oneOf:
+                - { $ref: '#/components/schemas/Escalation' }
+                - { type: 'null' }
+            review:
+              oneOf:
+                - { $ref: '#/components/schemas/Review' }
+                - { type: 'null' }
+            error: { type: [string, 'null'], description: Set when status is failed. }
+
+    Evidence:
+      type: object
+      description: One tool result, cited by id. Sensitive identifiers are masked.
+      required: [id, origin, tool, summary, created_at]
+      properties:
+        id: { type: string, examples: [ev-3] }
+        origin: { type: string, enum: [assistant, investigation] }
+        tool: { type: string, examples: [get_card_authorisations] }
+        args: { type: object }
+        summary: { type: string, description: One line for the timeline. }
+        data: { description: The tool result. }
+        created_at: { type: string, format: date-time }
+
+    Diagnosis:
+      type: object
+      required: [id, issue_type, root_cause, explanation, confidence, evidence_ids, recommended_action]
+      properties:
+        id: { type: string, format: uuid }
+        issue_type: { $ref: './scenario.schema.json#/$defs/IssueType' }
+        root_cause: { $ref: './scenario.schema.json#/$defs/RootCause' }
+        explanation: { type: string, description: The copilot's plain-language explanation. }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        evidence_ids:
+          type: array
+          minItems: 1
+          items: { type: string }
+        recommended_action: { type: string }
+
+    Escalation:
+      type: object
+      description: No conclusion within the step budget.
+      required: [summary, evidence_ids]
+      properties:
+        summary: { type: string }
+        evidence_ids:
+          type: array
+          items: { type: string }
+
+    Verdict:
+      type: string
+      enum: [accepted, corrected, rejected]
+
+    Review:
+      type: object
+      required: [verdict, created_at]
+      properties:
+        verdict: { $ref: '#/components/schemas/Verdict' }
+        corrected_issue_type:
+          oneOf:
+            - { $ref: './scenario.schema.json#/$defs/IssueType' }
+            - { type: 'null' }
+        corrected_root_cause:
+          oneOf:
+            - { $ref: './scenario.schema.json#/$defs/RootCause' }
+            - { type: 'null' }
+        hint: { type: [string, 'null'] }
+        notes: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+
+    FeedbackRequest:
+      type: object
+      required: [verdict]
+      properties:
+        verdict: { $ref: '#/components/schemas/Verdict' }
+        corrected_issue_type: { $ref: './scenario.schema.json#/$defs/IssueType' }
+        corrected_root_cause: { $ref: './scenario.schema.json#/$defs/RootCause' }
+        hint: { type: string, minLength: 1, description: Required when rejected. }
+        notes: { type: string }
+      description: '`corrected` requires `corrected_root_cause`; `rejected` requires `hint`.'
+
+    InvestigationEvent:
+      description: |
+        One timeline event, stored with an increasing id. `type` is also the SSE event name.
+        Section 8 types plus `escalated`, `review_recorded` and `status_changed`.
+      oneOf:
+        - $ref: '#/components/schemas/StepStartedEvent'
+        - $ref: '#/components/schemas/ClassifiedEvent'
+        - $ref: '#/components/schemas/ToolCallEvent'
+        - $ref: '#/components/schemas/EvidenceEvent'
+        - $ref: '#/components/schemas/TokenEvent'
+        - $ref: '#/components/schemas/DiagnosisEvent'
+        - $ref: '#/components/schemas/EscalatedEvent'
+        - $ref: '#/components/schemas/AwaitingReviewEvent'
+        - $ref: '#/components/schemas/ReviewRecordedEvent'
+        - $ref: '#/components/schemas/InvestigationStatusChangedEvent'
+      discriminator:
+        propertyName: type
+        mapping:
+          step_started: '#/components/schemas/StepStartedEvent'
+          classified: '#/components/schemas/ClassifiedEvent'
+          tool_call: '#/components/schemas/ToolCallEvent'
+          evidence: '#/components/schemas/EvidenceEvent'
+          token: '#/components/schemas/TokenEvent'
+          diagnosis: '#/components/schemas/DiagnosisEvent'
+          escalated: '#/components/schemas/EscalatedEvent'
+          awaiting_review: '#/components/schemas/AwaitingReviewEvent'
+          review_recorded: '#/components/schemas/ReviewRecordedEvent'
+          status_changed: '#/components/schemas/InvestigationStatusChangedEvent'
+    InvestigationEventBase:
+      type: object
+      required: [id, investigation_id, type, created_at, payload]
+      properties:
+        id: { type: integer, format: int64, description: 'Increasing; the SSE `id:`.' }
+        investigation_id: { type: string, format: uuid }
+        type: { type: string }
+        created_at: { type: string, format: date-time }
+        payload: { type: object }
+    StepStartedEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: step_started }
+            payload:
+              type: object
+              required: [node]
+              properties:
+                node:
+                  type: string
+                  description: Graph node name.
+                  examples: [intake, verify, triage, route, park, card_decline_investigator, evidence_check, diagnose, escalate, review, finalize]
+                step: { type: integer, minimum: 0, description: steps_used when the node started. }
+    ClassifiedEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: classified }
+            payload:
+              type: object
+              required: [issue_type, confidence, method]
+              properties:
+                issue_type: { $ref: './scenario.schema.json#/$defs/IssueType' }
+                confidence: { type: number, minimum: 0, maximum: 1 }
+                method: { type: string, enum: [verified, triaged] }
+                previous_category:
+                  oneOf:
+                    - { $ref: './scenario.schema.json#/$defs/IssueType' }
+                    - { type: 'null' }
+                reasoning: { type: string }
+    ToolCallEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: tool_call }
+            payload:
+              type: object
+              required: [call_id, tool, args]
+              properties:
+                call_id: { type: string }
+                tool: { type: string }
+                args: { type: object }
+    EvidenceEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: evidence }
+            payload:
+              type: object
+              required: [call_id, evidence]
+              properties:
+                call_id: { type: string }
+                evidence: { $ref: '#/components/schemas/Evidence' }
+    TokenEvent:
+      description: A piece of the final plain-language explanation only.
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: token }
+            payload:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string }
+    DiagnosisEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: diagnosis }
+            payload:
+              type: object
+              required: [diagnosis]
+              properties:
+                diagnosis: { $ref: '#/components/schemas/Diagnosis' }
+    EscalatedEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: escalated }
+            payload:
+              type: object
+              required: [escalation]
+              properties:
+                escalation: { $ref: '#/components/schemas/Escalation' }
+    AwaitingReviewEvent:
+      description: The graph paused at `interrupt()`; the stream closes after this event.
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: awaiting_review }
+            payload:
+              type: object
+              properties:
+                has_diagnosis: { type: boolean }
+    ReviewRecordedEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: review_recorded }
+            payload:
+              type: object
+              required: [review]
+              properties:
+                review: { $ref: '#/components/schemas/Review' }
+    InvestigationStatusChangedEvent:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationEventBase'
+        - type: object
+          properties:
+            type: { const: status_changed }
+            payload:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/InvestigationStatus' }
+                error: { type: [string, 'null'] }
+
+    # --- simulation --------------------------------------------------------
+    SimulationRequest:
+      type: object
+      description: Optional scenario-type picker. Without `type` a random type is used. `other` is rejected (400).
+      properties:
+        type: { $ref: './scenario.schema.json#/$defs/IssueType' }
+
+    SimulatedCustomer:
+      type: object
+      description: Deliberately carries no root cause or expected outcome.
+      required: [simulation_id, conversation_id, customer_id]
+      properties:
+        simulation_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        customer_name: { type: string }
