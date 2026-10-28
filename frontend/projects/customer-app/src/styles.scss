@@ -1,0 +1,53 @@
+/* Phone-sized layout for the customer app. */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: #e8ebf0;
+  color: #1d2433;
+  font-size: 15px;
+}
+a { color: #2457c5; }
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #c5cbd6;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+button.primary { background: #2457c5; border-color: #2457c5; color: #fff; }
+button:disabled { opacity: 0.5; cursor: default; }
+button.link { border: none; background: none; color: #2457c5; padding: 0; }
+input, textarea, select { font: inherit; border: 1px solid #c5cbd6; border-radius: 8px; padding: 8px; }
+.muted { color: #6b7385; }
+.error { color: #b3261e; }
+.badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
+  background: #eef1f6; color: #3a4357;
+}
+.badge.active, .badge.open, .badge.resolved { background: #e3f4e8; color: #1d6b35; }
+.badge.frozen, .badge.expired, .badge.handed_off { background: #fff1d6; color: #8a5a00; }
+.badge.blocked, .badge.closed, .badge.abandoned { background: #fde4e2; color: #9c2a20; }
+
+.phone {
+  max-width: 420px; height: 100vh; margin: 0 auto; background: #f7f8fa;
+  display: flex; flex-direction: column; box-shadow: 0 0 24px rgb(0 0 0 / 12%);
+}
+.top {
+  display: flex; gap: 12px; align-items: center; padding: 12px 16px;
+  background: #1d2a4d; color: #fff;
+}
+.top .brand { font-weight: 700; }
+.top .who { flex: 1; text-align: right; }
+.top .link { color: #c9d6ff; }
+.screen { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; }
+.tabs { display: flex; border-top: 1px solid #dde1e8; background: #fff; }
+.tabs a { flex: 1; text-align: center; padding: 12px 0; text-decoration: none; color: #6b7385; }
+.tabs a.active { color: #2457c5; font-weight: 600; }
+
+.card { background: #fff; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; box-shadow: 0 1px 2px rgb(0 0 0 / 6%); }
+.card h2 { font-size: 14px; margin: 0 0 8px; color: #6b7385; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; }
+.row + .row { border-top: 1px solid #f0f2f5; }
+.list-button { width: 100%; text-align: left; margin-bottom: 8px; padding: 12px; }

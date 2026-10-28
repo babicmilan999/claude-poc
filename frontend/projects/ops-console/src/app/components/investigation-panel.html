@@ -1,0 +1,158 @@
+@if (investigation(); as inv) {
+  <div class="head">
+    <h2>Investigation</h2>
+    <span class="badge" [class]="inv.status">{{ label(inv.status) }}</span>
+    @if (live()) {
+      <span class="badge running live">Live</span>
+    }
+    <span class="muted">{{ inv.trigger }} run &middot; queued {{ inv.queued_at | date: 'HH:mm:ss' }}
+      @if (inv.issue_type) { &middot; {{ label(inv.issue_type) }} }
+      &middot; {{ inv.steps_used }} steps</span>
+  </div>
+  @if (inv.error) {
+    <p class="error">Run failed: {{ inv.error }}</p>
+  }
+
+  <div class="cols">
+    <section class="timeline">
+      <h3>Timeline</h3>
+      <ol>
+        @for (entry of timeline().entries; track entry.id) {
+          @if (entry.kind === 'tool') {
+            <li class="tool">
+              <code>{{ entry.tool }}({{ entry.args | json }})</code>
+              @if (entry.evidence; as ev) {
+                <div class="result" [id]="'inv-ev-' + ev.id" [class.hl]="highlighted() === ev.id">
+                  <span class="badge">{{ ev.id }}</span> {{ ev.summary }}
+                </div>
+              } @else {
+                <div class="muted">running...</div>
+              }
+            </li>
+          } @else {
+            @switch (entry.event.type) {
+              @case ('step_started') {
+                <li class="step">{{ label(entry.event.payload.node) }}</li>
+              }
+              @case ('classified') {
+                <li class="classified">
+                  Classified as <strong>{{ label(entry.event.payload.issue_type) }}</strong>
+                  ({{ entry.event.payload.method }}, {{ entry.event.payload.confidence * 100 | number: '1.0-0' }}%)
+                  @if (entry.event.payload.previous_category && entry.event.payload.previous_category !== entry.event.payload.issue_type) {
+                    <span class="badge escalated">changed from {{ label(entry.event.payload.previous_category) }}</span>
+                  }
+                  @if (entry.event.payload.reasoning) {
+                    <div class="muted">{{ entry.event.payload.reasoning }}</div>
+                  }
+                </li>
+              }
+              @case ('diagnosis') {
+                <li class="milestone">Diagnosis: {{ label(entry.event.payload.diagnosis.root_cause) }}</li>
+              }
+              @case ('escalated') {
+                <li class="milestone">Escalated: {{ entry.event.payload.escalation.summary }}</li>
+              }
+              @case ('awaiting_review') {
+                <li class="milestone">Paused for review</li>
+              }
+              @case ('review_recorded') {
+                <li class="milestone">
+                  Review: <span class="badge" [class]="entry.event.payload.review.verdict">{{ entry.event.payload.review.verdict }}</span>
+                  @if (entry.event.payload.review.hint) { &middot; hint: "{{ entry.event.payload.review.hint }}" }
+                </li>
+              }
+              @case ('status_changed') {
+                <li class="status">Status: {{ label(entry.event.payload.status) }}</li>
+              }
+            }
+          }
+        } @empty {
+          <li class="muted">{{ inv.status === 'queued' ? 'Waiting for a worker...' : 'No events.' }}</li>
+        }
+      </ol>
+    </section>
+
+    <section class="outcome">
+      @if (diagnosis(); as d) {
+        <div class="diagnosis">
+          <h3>Diagnosis</h3>
+          <dl class="kv">
+            <dt>Issue type</dt><dd>{{ label(d.issue_type) }}</dd>
+            <dt>Root cause</dt><dd><strong>{{ label(d.root_cause) }}</strong></dd>
+            <dt>Confidence</dt><dd>{{ d.confidence * 100 | number: '1.0-0' }}%</dd>
+            <dt>Action</dt><dd>{{ d.recommended_action }}</dd>
+          </dl>
+          <p class="explanation">{{ timeline().explanation || d.explanation }}</p>
+          <div class="links">Evidence:
+            @for (id of d.evidence_ids; track id) {
+              <button type="button" class="link ev-link" (click)="showEvidence(id)">{{ id }}</button>
+            }
+          </div>
+        </div>
+      } @else if (escalation(); as e) {
+        <div class="diagnosis escalation">
+          <h3>Escalated</h3>
+          <p>{{ e.summary }}</p>
+          <div class="links">Evidence:
+            @for (id of e.evidence_ids; track id) {
+              <button type="button" class="link ev-link" (click)="showEvidence(id)">{{ id }}</button>
+            }
+          </div>
+        </div>
+      } @else if (timeline().explanation) {
+        <div class="diagnosis">
+          <h3>Diagnosis</h3>
+          <p class="explanation">{{ timeline().explanation }}<span class="caret">&#9612;</span></p>
+        </div>
+      }
+
+      @if (inv.review; as r) {
+        <div class="review-done">
+          <h3>Review</h3>
+          <span class="badge" [class]="r.verdict">{{ r.verdict }}</span>
+          @if (r.corrected_root_cause) { &middot; corrected to {{ label(r.corrected_root_cause) }} }
+          @if (r.hint) { <div>Hint: {{ r.hint }}</div> }
+          @if (r.notes) { <div class="muted">{{ r.notes }}</div> }
+        </div>
+      }
+
+      @if (canReview()) {
+        <form class="review" (ngSubmit)="submitReview()">
+          <h3>Review</h3>
+          <div class="verdicts">
+            <label><input type="radio" name="verdict" value="accepted" [(ngModel)]="verdict" /> Accept</label>
+            <label><input type="radio" name="verdict" value="corrected" [(ngModel)]="verdict" /> Correct</label>
+            <label><input type="radio" name="verdict" value="rejected" [(ngModel)]="verdict" /> Reject with hint</label>
+          </div>
+          @if (verdict === 'corrected') {
+            <label for="cit">Issue type</label>
+            <select id="cit" name="correctedIssueType" [(ngModel)]="correctedIssueType">
+              <option value="">(unchanged)</option>
+              @for (t of issueTypes; track t) { <option [value]="t">{{ label(t) }}</option> }
+            </select>
+            <label for="crc">Root cause</label>
+            <select id="crc" name="correctedRootCause" [(ngModel)]="correctedRootCause" required>
+              <option value="">Choose...</option>
+              @for (c of rootCauses; track c) { <option [value]="c">{{ label(c) }}</option> }
+            </select>
+          }
+          @if (verdict === 'rejected') {
+            <label for="hint">Hint for the copilot</label>
+            <textarea id="hint" name="hint" rows="2" [(ngModel)]="hint" placeholder="What should it check?"></textarea>
+          }
+          <label for="notes">Notes</label>
+          <textarea id="notes" name="notes" rows="2" [(ngModel)]="notes"></textarea>
+          <div><button type="submit" class="primary" [disabled]="submitting() || !formValid()">Submit review</button></div>
+        </form>
+      }
+
+      <h3>Evidence</h3>
+      <ops-evidence-list [evidence]="evidence()" prefix="inv-ev-list" [highlighted]="highlighted()" />
+    </section>
+  </div>
+} @else if (!error()) {
+  <p class="muted">Loading investigation...</p>
+}
+@if (error()) {
+  <p class="error">{{ error() }}</p>
+}
