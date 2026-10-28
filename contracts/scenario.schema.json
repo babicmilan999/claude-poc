@@ -49,6 +49,12 @@
         "payee_account_closed",
         "mandate_cancelled_by_customer",
         "account_closed_by_originator",
+        "online_payments_disabled",
+        "card_lost_or_stolen",
+        "account_not_active",
+        "invalid_payee_details",
+        "no_mandate",
+        "payer_account_closed",
         "unknown"
       ]
     },

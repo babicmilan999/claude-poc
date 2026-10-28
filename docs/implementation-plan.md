@@ -17,16 +17,17 @@ Status: `[ ]` open · `[x]` done · `[~]` partly done (see note).
 
 No parallel work: everything later depends on this.
 
-- [ ] **Repo skeleton** (owner: orchestrator): folders per the repo layout in `docs/architecture.md`, `.env.example`, root `Makefile` with `test`, `test-agent`, `test-banking`, `test-frontend`, `lint-contracts`, `up`, `infra`, `models` (targets for apps that do not exist yet print "skipped").
+- [x] **Repo skeleton** (owner: orchestrator): folders per the repo layout in `docs/architecture.md`, `.env.example`, root `Makefile` with `test`, `test-agent`, `test-banking`, `test-frontend`, `lint-contracts`, `up`, `infra`, `models` (targets for apps that do not exist yet print "skipped").
   Done when: `make test` and `make lint-contracts` run without error.
-- [ ] **Banking API contract** (owner: orchestrator): `contracts/banking-api.yaml`, read-only endpoints behind every ops tool in section 6 and customer tool in section 3 (cards, authorisations, balance, card controls, fraud flags, scheduled payments, payment attempts, transactions, payees, mandates, direct debit collections, customers), plus `/simulation/incidents`. Reason codes as enums.
+- [x] **Banking API contract** (owner: orchestrator): `contracts/banking-api.yaml`, read-only endpoints behind every ops tool in section 6 and customer tool in section 3 (cards, authorisations, balance, card controls, fraud flags, scheduled payments, payment attempts, transactions, payees, mandates, direct debit collections, customers), plus `/simulation/incidents`. Reason codes as enums.
   Done when: lints clean; every tool in the architecture doc maps to an endpoint.
-- [ ] **Agent API contract** (owner: orchestrator): `contracts/agent-api.yaml`: conversations and messages (SSE), cases, investigations, events (SSE with `Last-Event-ID`), feedback, simulation, plus a schema per SSE event type from section 8.
+- [x] **Agent API contract** (owner: orchestrator): `contracts/agent-api.yaml`: conversations and messages (SSE), cases, investigations, events (SSE with `Last-Event-ID`), feedback, simulation, plus a schema per SSE event type from section 8.
   Done when: lints clean; every ops console and customer app screen in the doc maps to endpoints.
-- [ ] **Scenario format** (owner: orchestrator): `contracts/scenario.schema.json` for eval and simulation scenarios (incident type, complaint, persona hints, expected issue type, root cause, outcome), with two examples.
+- [x] **Scenario format** (owner: orchestrator): `contracts/scenario.schema.json` for eval and simulation scenarios (incident type, complaint, persona hints, expected issue type, root cause, outcome), with two examples.
   Done when: the examples validate against the schema.
-- [ ] **CI runs** (owner: orchestrator): `.github/workflows/ci.yml` calls the make targets.
+- [~] **CI runs** (owner: orchestrator): `.github/workflows/ci.yml` calls the make targets.
   Done when: CI is green on the Phase 0 PR.
+  Note: `ci.yml` already calls the make targets; not yet confirmed green, because the session could not push (GitHub 403).
 
 ## Phase 1 — Components against the contracts (parallel)
 
@@ -69,8 +70,15 @@ Add questions found during the build here, with the task they came from.
 - **Extra investigation SSE events** (Agent API contract). Section 8 lists `step_started, classified, tool_call, evidence, token, diagnosis, awaiting_review`. The contract adds `escalated` (escalate has no diagnosis to show), `review_recorded` and `status_changed` (so the timeline shows the review and the end of a run). Confirm, then add them to section 8.
 - **"Account closed by the originator"** (Banking API contract). The failed direct debit `needs_human` row in section 5 is ambiguous. The contract reads it as the originator's side closing the account the collection belongs to (root cause `account_closed_by_originator`, failure code `ACCOUNT_CLOSED_BY_ORIGINATOR`). Confirm the meaning, so banking-dev can write the rule.
 - **👍 / 👎 versus "did this help?"** (Agent API contract). Section 4 has both a 👍 / 👎 per answer and the customer confirming an answer helped. The contract treats them as one signal: `up` resolves the conversation, `down` counts as "that didn't help" for the repeated-failure rule.
-- **Customer session** (Agent API contract). "Log in as" is passed as an `X-Customer-Id` header on customer endpoints; the server injects it into customer-scoped tools. Dev-only, no real authentication.
+- **Lifecycle details not in sections 5 and 9** (Agent API contract). The contract decides: a parked run ends `completed` with no diagnosis; a run still failing after its retries ends `failed` and the case goes to `needs_manual`; rejecting an escalation moves the case `escalated → investigating`; accepting an escalation means "handled manually" and resolves the case; Re-investigate on a `resolved` case is rejected. Confirm, then add the transitions to the case lifecycle diagram.
+- **Field differences from section 9** (Agent API contract). `CONVERSATION.status` is `open`/`closed` (outcome separate); `rating` is `up`/`down`, not an int; `CASE` gains `summary` (handoff summary) and `simulated`. One diagnosis and one review per investigation are returned; earlier ones after a reject survive only in the event log.
+- **Root-cause codes beyond section 5** (scenario schema). `RootCause` also has codes for banking reasons no scenario uses yet (`online_payments_disabled`, `card_lost_or_stolen`, `account_not_active`, `invalid_payee_details`, `no_mandate`, `payer_account_closed`), so a diagnosis can name them instead of `unknown`.
+- **What the stream replays** (Agent API contract). Only investigation events are stored (section 9). Watch mode replays stored messages, then goes live (tokens are not stored, no `Last-Event-ID`); the case queue stream is live only and the console reloads `GET /cases` after a reconnect.
+- **Customer session** (Agent API contract). "Log in as" is passed as an `X-Customer-Id` header on customer endpoints; the server injects it into customer-scoped tools. Dev-only, no real authentication. Conversation reads (`GET /conversations/{id}`, `/events`) are not customer-scoped, because watch mode needs them.
+- **Code generation** (contracts). Both specs `$ref` the shared enums in `scenario.schema.json`. Generators with weak OpenAPI 3.1 support should use `make bundle-contracts` (single-file specs in `contracts/dist/`, git-ignored). Nullable enums are written as `oneOf: [$ref, null]`, which some generators wrap in an extra class.
 
 ## Progress notes
 
 Add a short note per session: date, phase, what was done, what is left.
+
+- **2026-10-28, Phase 0.** Done: repo skeleton (folders, root `Makefile`, `.env.example`), `contracts/banking-api.yaml`, `contracts/agent-api.yaml`, `contracts/scenario.schema.json` with two examples; `make test` (all skipped) and `make lint-contracts` pass. The reviewer found nothing blocking; the medium findings are fixed in the contracts or recorded above. Left: push the branch and open the Phase 0 PR (the session got GitHub 403), then confirm CI is green.

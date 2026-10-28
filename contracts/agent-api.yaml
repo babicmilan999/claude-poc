@@ -210,9 +210,10 @@ paths:
       operationId: rateMessage
       summary: Rate an assistant answer (👍 / 👎)
       description: |
-        `up` counts as the customer confirming the answer helped (the conversation
-        becomes `resolved`). `down` counts as "that didn't help"; a second one triggers
-        the repeated-failure handoff rule on the next message.
+        `up` counts as the customer confirming the answer helped: the conversation's
+        `outcome` becomes `resolved`, but it stays `open`, and a new customer message clears
+        the outcome again. `down` counts as "that didn't help"; a second one triggers the
+        repeated-failure handoff rule on the next message.
       parameters:
         - $ref: '#/components/parameters/CustomerHeader'
       requestBody:
@@ -244,9 +245,11 @@ paths:
       tags: [conversations]
       operationId: streamConversationEvents
       summary: Follow a conversation live (watch mode)
-      description: Resumable SSE stream of every `ChatEvent` in the conversation, from the start or after `Last-Event-ID`.
-      parameters:
-        - $ref: '#/components/parameters/LastEventId'
+      description: |
+        SSE stream for watch mode. It first replays the stored messages as `message_created`
+        events (and the current `conversation_status`), then streams live events, including
+        `token`s of an answer in progress. Tokens are not stored, so there is no
+        `Last-Event-ID` resume: after a reconnect the client simply reopens the stream.
       responses:
         '200':
           description: SSE stream of `ChatEvent` objects.
@@ -313,9 +316,9 @@ paths:
       tags: [cases]
       operationId: streamCaseEvents
       summary: Case queue updates
-      description: Resumable SSE stream of `CaseEvent` objects. Without `Last-Event-ID` it starts live (no replay).
-      parameters:
-        - $ref: '#/components/parameters/LastEventId'
+      description: |
+        Live SSE stream of `CaseEvent` objects (not stored, no replay). After a reconnect the
+        console reloads `GET /cases`.
       responses:
         '200':
           description: SSE stream of `CaseEvent` objects.
@@ -347,8 +350,9 @@ paths:
       operationId: investigateCase
       summary: Investigate (manual run)
       description: |
-        Queues a `manual` investigation, which is never parked. If an investigation of this
-        case is already `queued` or `running`, returns it instead (200).
+        Queues a `manual` investigation, which is never parked. If the case already has an
+        active investigation (`queued`, `running` or `awaiting_review`), returns it instead
+        (200), so a case never has two active investigations.
       responses:
         '200':
           description: The already active investigation.
@@ -377,7 +381,7 @@ paths:
       description: |
         Starts a **new** investigation (new LangGraph thread) on the same case. An earlier
         investigation still `awaiting_review` becomes `superseded`. Rejected with 409 while
-        one is `queued` or `running`.
+        one is `queued` or `running`, or when the case is `resolved`.
       responses:
         '201':
           description: The new queued investigation.
@@ -419,7 +423,9 @@ paths:
         - name: after_id
           in: query
           required: false
-          description: JSON variant only. Return events with an id greater than this.
+          description: |
+            Return events with an id greater than this. Same as `Last-Event-ID`, for clients
+            that cannot set the header (the browser `EventSource` after a page refresh).
           schema: { type: integer, format: int64 }
       responses:
         '200':
@@ -444,6 +450,8 @@ paths:
         Resumes the investigation's `interrupt()`. `accepted` and `corrected` finalize it
         (investigation `completed`, case `resolved`). `rejected` resumes the **same**
         thread with the hint in its state (investigation `running`, case `investigating`).
+        For an escalation (no diagnosis), `accepted` means "handled manually" and resolves
+        the case; `corrected` records the root cause the ops agent found.
         Only allowed while the investigation is `awaiting_review` (409 otherwise).
       requestBody:
         required: true
@@ -621,7 +629,7 @@ components:
     # --- conversations -----------------------------------------------------
     ConversationStatus:
       type: string
-      description: '`open` accepts messages; `closed` has an outcome.'
+      description: '`open` accepts messages. `closed` after a handoff or when abandoned.'
       enum: [open, closed]
     ConversationOutcome:
       type: string
@@ -734,7 +742,7 @@ components:
       type: object
       required: [id, type, conversation_id, created_at]
       properties:
-        id: { type: string, description: 'Increasing per conversation; the SSE `id:`.' }
+        id: { type: string, description: 'Unique within the conversation stream.' }
         type: { type: string }
         conversation_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
@@ -838,7 +846,7 @@ components:
         active_investigation_id:
           type: [string, 'null']
           format: uuid
-          description: The latest investigation that is not completed, failed or superseded.
+          description: The investigation that is `queued`, `running` or `awaiting_review`, if any (at most one).
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
@@ -921,7 +929,11 @@ components:
     # --- investigations ----------------------------------------------------
     InvestigationStatus:
       type: string
-      description: '`queued` rows are the job queue. `superseded`: replaced by a Re-investigate while awaiting review.'
+      description: |
+        `queued` rows are the job queue. A parked run ends `completed` with no diagnosis
+        (case `needs_manual`). A run that is still failing after its retries ends `failed`
+        and moves the case to `needs_manual`. `superseded`: replaced by a Re-investigate
+        while awaiting review.
       enum: [queued, running, awaiting_review, completed, failed, superseded]
     InvestigationTrigger:
       type: string
