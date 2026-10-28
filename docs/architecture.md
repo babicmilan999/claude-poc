@@ -140,14 +140,28 @@ flowchart TB
     agent_svc -.-> langfuse
 ```
 
-**Model routing via LiteLLM.** Both agents only ever ask for model aliases; the LiteLLM config maps them to real models, so switching provider is a config change, not a code change.
+**Model routing via LiteLLM.** The agent code never names a model or a provider. Each step asks for an **alias** named after its role, and a **profile** (one LiteLLM config file) maps every alias to a real model. Switching provider, or moving one step to another model, is a config change, not a code change.
 
-| Alias | Used for | Default (Anthropic API) | Free profile (Ollama) |
-|---|---|---|---|
-| `fast` | triage, guardrail checks, summaries, simulated customers | small Claude model (Haiku) | small local model, e.g. Llama 3.1 8B |
-| `reasoning` | assistant answers, investigation loop, diagnosis | larger Claude model (Sonnet) | larger local model with tool calling, e.g. Qwen 2.5 14B |
+| Alias | Used for | Needs |
+|---|---|---|
+| `triage` | triage, input guard | fast, cheap, reliable structured output |
+| `assistant` | customer replies, handoff summaries | good tone, grounded answers, light tool calling |
+| `reasoning` | investigation loop, diagnosis, the copilot's explanation | multi-step tool calling, careful reasoning over evidence |
+| `simulator` | simulated customers, generating new scenarios | cheap, high volume, never seen by real customers |
+| `judge` | output grounding guard, LLM-as-judge evals | at least as strong as the models it checks |
 
-The profile is chosen with an environment variable (`LLM_PROFILE=anthropic` or `LLM_PROFILE=ollama`). Small local models give lower accuracy; the eval loop (section 10) shows the difference in numbers.
+| Profile | `triage` | `assistant` | `reasoning` | `simulator` | `judge` | Needs |
+|---|---|---|---|---|---|---|
+| `anthropic` (default) | small Claude model (Haiku) | small Claude model (Haiku) | larger Claude model (Sonnet) | small Claude model (Haiku) | larger Claude model (Sonnet) | `ANTHROPIC_API_KEY` |
+| `ollama` (free) | small local model, e.g. Llama 3.1 8B | larger local model, e.g. Qwen 2.5 14B | larger local model with tool calling, e.g. Qwen 2.5 14B | small local model | larger local model | Ollama running |
+| `mixed` | small local model | small Claude model | larger Claude model | small local model | larger Claude model | both |
+| `aws` (optional, section 12) | open model on Bedrock | Claude on Bedrock | Claude on Bedrock | open model on Bedrock | Claude on Bedrock | AWS credentials |
+
+- The profile is chosen with an environment variable, for example `LLM_PROFILE=mixed`. The model names are examples; each profile file pins exact versions.
+- **`mixed` is the profile the evals are expected to point to:** open models where they hold up (classification and simulation), Claude on the agentic and customer-facing steps. Which steps actually move is decided by the profile comparison in section 10, not in advance.
+- Every trace carries the profile and the alias as metadata, so Langfuse scores, cost and latency can be split by both.
+- Profiles can also set **fallbacks** (for example `reasoning` falls back from the Anthropic API to Bedrock if it fails or rate-limits) and per-alias budgets and rate limits.
+- Small local models give lower accuracy, especially on long tool-calling chains; the eval loop shows the difference in numbers.
 
 ## 3. Shared platform
 
@@ -164,7 +178,7 @@ Both agents are LangGraph graphs in the same Python codebase and share one core:
 
 **Tool scoping.** Tools are plain Python functions with typed inputs. The **customer-scoped** versions never take a `customer_id` from the LLM: the server injects it from the logged-in session, so the assistant cannot read another customer's data however it is prompted. They also return customer-safe fields only (for example a decline reason such as "card frozen", but never fraud-rule details or internal codes). The **ops-scoped** versions return the full records.
 
-Triage itself is one short `fast` call with structured output (category, confidence, optional secondary category, one-line reasoning), grounded by the signal snapshot. Below a confidence threshold it returns `other`.
+Triage itself is one short `triage` call with structured output (category, confidence, optional secondary category, one-line reasoning), grounded by the signal snapshot. Below a confidence threshold it returns `other`.
 
 ## 4. In-app customer assistant
 
@@ -214,9 +228,9 @@ The handoff creates a case with `source = assistant_handoff`, the **category**, 
 
 ### Guardrails
 
-- **Input guard:** a `fast` check (plus simple rules) for prompt injection ("ignore your instructions…", requests for other customers' data), abuse, and topics outside payments and cards. Off-topic questions get a polite redirect.
+- **Input guard:** a `triage`-alias check (plus simple rules) for prompt injection ("ignore your instructions…", requests for other customers' data), abuse, and topics outside payments and cards. Off-topic questions get a polite redirect.
 - **Scope by construction:** customer-scoped tools with a server-injected `customer_id`; read-only in v1 (no freezing cards, no payments).
-- **Output guard:** every factual statement about the customer's account must be backed by a tool result, and every policy statement by a knowledge base article; otherwise the answer is regenerated once, then handed off. It also blocks financial advice and internal details (fraud rules, risk scores, internal codes).
+- **Output guard:** a `judge`-alias check that every factual statement about the customer's account is backed by a tool result, and every policy statement by a knowledge base article; otherwise the answer is regenerated once, then handed off. It also blocks financial advice and internal details (fraud rules, risk scores, internal codes).
 - **Data handling:** card numbers and other sensitive identifiers are masked before anything is sent to the LLM or to Langfuse.
 
 ### Knowledge base
@@ -288,7 +302,7 @@ Two buttons in the ops console (and matching `make` targets):
 **Simulate customer** (the full journey)
 1. The agent service asks the banking service's simulation module for an incident of a given or random type, for example `POST /simulation/incidents {"type": "card_decline"}`.
 2. The banking service sets up the situation through its **real domain operations and rules** (for example: freeze the card, then process card payments through the normal authorisation logic, which declines them with `CARD_FROZEN`). It returns the customer, what the customer would know and say, the **expected root cause**, and the **expected outcome**: `self_serve` (the assistant should resolve it) or `needs_human` (the assistant should hand off, for example a fraud block).
-3. A **simulated customer** (a `fast` LLM with a persona: how vague, how patient, how they phrase things) opens a conversation and chats with the assistant **through the same API as the customer app**, for up to a set number of turns. It only knows what a real customer would know.
+3. A **simulated customer** (a `simulator`-alias LLM with a persona: how vague, how patient, how they phrase things) opens a conversation and chats with the assistant **through the same API as the customer app**, for up to a set number of turns. It only knows what a real customer would know.
 4. The conversation ends resolved or handed off. A handoff creates a case, which is investigated automatically.
 5. Expected root cause and expected outcome are stored on the conversation and case, **hidden from both agents and the ops agent**, so every simulated journey is scored automatically (section 10).
 
@@ -644,8 +658,16 @@ flowchart LR
 ```
 
 - The assistant and the copilot are also evaluated **separately**: the assistant on fixed conversation scripts (no simulated customer, so results are repeatable), the copilot on cases with fixed complaints.
-- The same datasets can be run against each LiteLLM profile, so Claude and the local Ollama models can be compared side by side in Langfuse.
-- In CI, the eval job starts the Compose stack and uses the Anthropic API (the key is a GitHub Actions secret). Ollama models are usually too slow for free CI runners, so the Ollama profile is evaluated locally.
+- The same datasets can be run against each LiteLLM profile (`make eval PROFILE=mixed`), so Claude, the local open models and the mixed setup can be compared side by side in Langfuse. The comparison decides which aliases can move to open models:
+
+| Profile | Triage accuracy | Diagnosis accuracy | Groundedness | Steps per investigation | Cost per investigation | p50 latency |
+|---|---|---|---|---|---|---|
+| `anthropic` | *to be measured* | | | | | |
+| `mixed` | | | | | | |
+| `ollama` | | | | | | |
+
+- An alias moves to a cheaper model only if its own scores stay within an agreed margin (for example triage accuracy drops by at most 2 points). The `judge` alias stays on the strongest model available in each profile, so a weaker model is never graded by an even weaker one.
+- In CI, the eval job starts the Compose stack and uses the Anthropic API (the key is a GitHub Actions secret). Ollama models are usually too slow for free CI runners, so the `ollama` and `mixed` profiles are evaluated locally.
 
 ## 11. Local runtime (Docker Compose)
 
@@ -697,16 +719,16 @@ flowchart TB
     lf_worker --> lf_minio
 ```
 
-- `docker compose up` starts everything except Ollama. `docker compose --profile ollama up` adds Ollama, and `LLM_PROFILE=ollama` points LiteLLM at it.
+- `docker compose up` starts everything except Ollama. `docker compose --profile ollama up` adds Ollama, and `LLM_PROFILE=ollama` or `LLM_PROFILE=mixed` points LiteLLM at it. (Compose profiles choose which containers run; `LLM_PROFILE` chooses the LiteLLM config. They are separate settings.)
 - Postgres uses an image with the **pgvector** extension (for example `pgvector/pgvector:pg16`).
-- The only secret is `ANTHROPIC_API_KEY`, read from a git-ignored `.env` file. Not needed with the Ollama profile.
+- The only secret is `ANTHROPIC_API_KEY`, read from a git-ignored `.env` file. Not needed with the `ollama` profile; the `mixed` profile needs both the key and Ollama.
 - Self-hosted Langfuse brings its own Postgres, ClickHouse, Redis and MinIO; keep them separate from the app's Postgres so either can be reset independently.
 - On a Mac, Ollama runs much faster natively (using the GPU) than inside Docker. In that case skip the `ollama` container and point LiteLLM at `host.docker.internal:11434`.
 - The workers and the customer simulator run inside the `agent-service` container for the POC. They can later move to their own containers (same image, different start command) to scale separately from the API.
 
 ## 12. Optional later: AWS deployment
 
-Not needed for the POC. If the app is later hosted on AWS, the same container images move to ECS, and only the LiteLLM config changes (Anthropic API → Bedrock, or keep the Anthropic API).
+Not needed for the POC. If the app is later hosted on AWS, the same container images move to ECS, and only the LiteLLM profile changes: the `aws` profile serves Claude **and** open-weight models through Bedrock, inside the account and region the bank chooses (or keep the Anthropic API). A fine-tuned triage model could be added through Bedrock Custom Model Import. Open models on Bedrock still cost money per token; they are cheaper, not free.
 
 ```mermaid
 flowchart TB
@@ -725,7 +747,7 @@ flowchart TB
         rds[("RDS PostgreSQL<br/>with pgvector")]
         s3[("S3<br/>customer-app + ops-console<br/>static sites")]
         secrets["Secrets Manager"]
-        bedrock[("Bedrock<br/>or Anthropic API")]
+        bedrock[("Bedrock<br/>Claude + open models<br/>or Anthropic API")]
     end
 
     langfuse["Langfuse<br/>(cloud or self-hosted)"]
@@ -761,7 +783,9 @@ claude-poc/
 │   ├── docker-compose.yml
 │   ├── litellm/
 │   │   ├── anthropic.yaml   # default profile
-│   │   └── ollama.yaml      # free local profile
+│   │   ├── ollama.yaml      # free local profile
+│   │   ├── mixed.yaml       # open models for triage/simulator, Claude for the rest
+│   │   └── aws.yaml         # optional, Bedrock
 │   └── terraform/           # optional, later
 ├── .env.example          # ANTHROPIC_API_KEY, LLM_PROFILE, AUTO_INVESTIGATE_TYPES, SIMULATION_ENABLED, Langfuse keys
 └── .github/workflows/
@@ -814,3 +838,36 @@ The first step that decides what kind of problem this is (card decline, missed p
 
 **Can the design support both the ops copilot and the customer assistant?**
 Yes, as two agents on one shared platform. The in-app assistant is the customer's first point of contact: it categorises, answers what it can, and hands off the rest as already-categorised cases with the transcript and evidence. The ops copilot verifies that category instead of trusting it blindly, investigates, and an ops agent reviews. Triage, banking tools, LLM access, guardrails and tracing are shared.
+
+**What is Langfuse, and how is it used here?**
+Open-source observability and evaluation for LLM apps. A **trace** is one run (one investigation, or one assistant reply), made of nested **observations**: graph nodes and tool calls as spans, LLM calls as generations with prompt, output, tokens, cost and latency. Traces are grouped into **sessions** (a whole conversation, or all runs on a case). **Scores** (diagnosis correct, handoff correct, groundedness, 👍/👎, ops verdicts) attach to traces; **datasets** and **experiments** run a version of the app over fixed scenarios. Data arrives through the LangChain callback handler passed to LangGraph, plus `@observe` for code outside the graphs, with a masking function applied first. Only the agent service sends traces, because it knows the node and the case; LiteLLM's own Langfuse logging stays off so calls are not recorded twice. Prompts stay in the repo (versioned with the code and tested by the eval gate), with the prompt version added to each trace. Self-hosted v3 is the heaviest part of the local stack; Langfuse Cloud's free tier is a drop-in alternative.
+
+**What counts as an agent? Is the Python service an agent?**
+An agent is an LLM using tools in a loop, where the model decides the next step and when it is done. A workflow is LLM calls along paths that our code defines. The agent service is neither: it is the host (API, workers, streaming). Inside it, triage and diagnosis are single LLM calls; the investigation graph is a workflow that enforces the mandatory process (triage, evidence, human review); the investigator subgraph is an agent, because the model chooses which banking tools to call and when it has enough evidence; and the customer assistant is a tool-using agent behind guardrails. Agentic inside, deterministic outside.
+
+**Is the harness an agent?**
+No. Agent = model + harness. The harness is everything except the model: it runs the loop, executes the tools the model asks for, manages context, enforces limits (step budgets, permissions, approvals), keeps state and records traces. Claude Code is an example: Claude is the model, the CLI is the harness, and together they are the agent. Here, LangGraph provides the generic harness machinery, our graphs, tool wrappers, guardrails and prompts make it specific to payments, and FastAPI and the workers host it.
+
+**What are Claude Code routines, and could they help this project?**
+Saved Claude Code sessions (prompt, repository, connectors) that run in Anthropic's cloud on a trigger: a schedule, an API call, or a GitHub event. They are developer tooling for work on the repo, never part of the product runtime. Useful later: checking that the architecture doc still matches the graph code, reviewing PRs against the design rules (injected `customer_id`, masking, the review `interrupt()`), investigating eval-gate failures, and proposing new scenarios. Limitation: the cloud sandbox cannot reach the local Docker stack or self-hosted Langfuse. Routines are not needed to build the project and can be added at any time without changes.
+
+**Can the build itself run in parallel, in the cloud?**
+Yes. The apps live in separate folders with clear boundaries, so separate Claude Code sessions (local git worktrees or cloud sessions, each on its own branch and PR) can build them at the same time. Contracts come first, in one session: the repo skeleton, the banking OpenAPI spec, the DB schema, the agent API and event formats, and the Compose file. Then banking service, agent core, front-ends and knowledge base/infra in parallel against those contracts, then the two graphs and the simulator, then integration and the first evals locally, where the full stack runs. One writer per folder, and every session tests against mocks of the contracts.
+
+**When should we use routines instead of our own setup?**
+Routines suit low-volume, judgment-based chores on a repo with a standard trigger, when nothing needs to be hosted. Our own setup is needed when the work is part of the product, needs local or private systems or heavy environments, has strict data rules, runs at high volume, needs a custom harness or non-Claude models, or should live in the repo as code. Deterministic jobs (tests, the eval gate, Mermaid checks, dependency updates) need no LLM at all: plain CI and Renovate. Routines are a convenience layer: when one becomes important, the same prompt can move into GitHub Actions or the Agent SDK.
+
+**Why would anyone use open-weight models, and why here?**
+In general: data control (nothing leaves your environment), lower cost at volume, fine-tuning on your own data, stable and reproducible versions, no lock-in or rate limits, offline and low-latency use, and free experimentation. The costs are weaker multi-step tool use, running the infrastructure yourself, and more safety work. Here: some banks require that payment data never leaves their environment; simulation and evals generate a lot of calls no customer sees; triage and the input guard are narrow tasks a small (possibly fine-tuned) model handles well; and local development needs no API key. The investigator loop, diagnosis and customer replies stay on a frontier model unless the evals show otherwise.
+
+**Is it common to use open-weight models on AWS Bedrock? Are they free there?**
+Yes, especially at companies already on AWS: open models (for example Llama, Mistral, DeepSeek, Qwen, gpt-oss; the catalogue changes) sit behind the same Bedrock API, IAM, logging and billing as Claude, with no GPUs to run, and fine-tuned weights can be served through Custom Model Import. They are not free: "open weight" means free to download, not free to run. Bedrock charges per token on demand, per hour for provisioned throughput, or for compute time with imported models; self-hosting means paying for GPUs. Open models save the model provider's margin and are cheaper per token when small. Ollama on a laptop is free only because the hardware is already paid for.
+
+**How do big open-weight models compare with frontier paid models?**
+On standard benchmarks the best open models are close to frontier models from a few months earlier, but benchmarks flatter them. The largest remaining gap is long agentic tasks: many tool calls, recovering from errors, knowing when to stop. Consistency, long context and resistance to prompt injection also tend to favour frontier models. Through a hosted API, big open models are often several times cheaper per token; self-hosting them needs a multi-GPU server and only pays off at high, steady volume. Licences vary. For this project, a big open model is worth testing on the investigator step via a profile, and the eval comparison decides.
+
+**What is the case for having LiteLLM and open models in this design?**
+Choosing a model is a decision we measure, not one we hard-code. All LLM calls go through LiteLLM with role-based aliases, which gives four things: the system can run fully in-house when a bank requires it; each step gets the model that fits it; simulation and evals are free to run at volume; and Langfuse compares profiles on the same datasets (accuracy, cost, latency), which also covers new model releases, price changes and outages. The gateway is one container and one YAML file per profile, less code than provider-specific clients, and it adds central keys, budgets, rate limits, fallbacks and cost tracking. The claim is not that open models are as good, but that we can measure where they are good enough.
+
+**What is a profile here, and does every agent always use the same provider?**
+A profile is one LiteLLM config file that maps the role aliases (`triage`, `assistant`, `reasoning`, `simulator`, `judge`) to real models, chosen at startup with `LLM_PROFILE`. The code only ever names an alias. A profile is not tied to one provider: `anthropic` and `ollama` use one each, while `mixed` sends triage and simulated customers to local open models and the agentic and customer-facing steps (and the judge) to Claude. Per-step aliases are what make that possible.
