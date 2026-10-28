@@ -21,14 +21,14 @@ Two AI agents on one shared platform, covering a payments-support journey end to
 - One shared core (triage, banking tools, LLM access, tracing, guardrails) used by both agents.
 - **Simulated customers** that chat with the assistant like real ones, so the whole journey can be demoed and measured with fresh, realistic incidents.
 - Accuracy and outcome metrics for both agents, tracked over time.
-- **Local-first:** the whole system runs on a laptop with `docker compose up`. The only cost is LLM tokens, and switching to a local model makes it free.
+- **Local-first:** the whole system runs on a laptop with `docker compose up` and local open models through Ollama, at no cost by default. Claude through the Anthropic API is one setting away, paid per token, and is used for evals and demos once the system works.
 
 ## Tech stack
 
 | Concern | Choice |
 |---|---|
 | Agent runtime | Python 3.12, FastAPI, LangGraph (two graphs: `assistant`, `investigation`) |
-| LLM access | LiteLLM proxy → Anthropic API (Claude), or Ollama for a free local model |
+| LLM access | LiteLLM proxy → Ollama (local open models, default, free), or Anthropic API (Claude, paid) |
 | Knowledge base search | PostgreSQL + pgvector; embeddings with a small local model (fastembed, in-process) |
 | Observability & evals | Langfuse, self-hosted in Docker (traces, scores, datasets) |
 | Banking domain service (mock core banking) | Java 21, Spring Boot 3 |
@@ -43,7 +43,7 @@ Two AI agents on one shared platform, covering a payments-support journey end to
 |---|---|
 | Everything in Docker Compose (services, Postgres, Langfuse, LiteLLM, Ollama) | Free |
 | Embeddings for the knowledge base | Free (local model, in-process) |
-| Anthropic API | Pay per token; a POC conversation or investigation is roughly cents |
+| Anthropic API (optional) | Pay per token from prepaid API credits, billed separately from any Claude subscription; a POC conversation or investigation is roughly cents. Not needed while building. |
 | GitHub Actions | Free for public repos; monthly free minutes for private repos |
 | AWS (optional, later) | Hourly charges for Fargate, RDS, load balancer, plus Bedrock tokens |
 
@@ -70,8 +70,8 @@ flowchart LR
     console -->|"REST + SSE stream"| agents
     agents -->|"read-only tool calls,<br/>simulate incident"| banking
     agents -->|"OpenAI-compatible API"| litellm
-    litellm -->|"default"| anthropic
-    litellm -.->|"free option"| ollama
+    litellm -->|"default"| ollama
+    litellm -.->|"paid, for evals"| anthropic
     agents -.->|"traces, scores"| langfuse
     litellm -.->|"token usage, cost"| langfuse
 ```
@@ -152,12 +152,13 @@ flowchart TB
 
 | Profile | `triage` | `assistant` | `reasoning` | `simulator` | `judge` | Needs |
 |---|---|---|---|---|---|---|
-| `anthropic` (default) | small Claude model (Haiku) | small Claude model (Haiku) | larger Claude model (Sonnet) | small Claude model (Haiku) | larger Claude model (Sonnet) | `ANTHROPIC_API_KEY` |
-| `ollama` (free) | small local model, e.g. Llama 3.1 8B | larger local model, e.g. Qwen 2.5 14B | larger local model with tool calling, e.g. Qwen 2.5 14B | small local model | larger local model | Ollama running |
+| `anthropic` (paid, quality baseline) | small Claude model (Haiku) | small Claude model (Haiku) | larger Claude model (Sonnet) | small Claude model (Haiku) | larger Claude model (Sonnet) | `ANTHROPIC_API_KEY` |
+| `ollama` (default, free) | small local model, e.g. Llama 3.1 8B | larger local model, e.g. Qwen 2.5 14B | larger local model with tool calling, e.g. Qwen 2.5 14B | small local model | larger local model | Ollama running |
 | `mixed` | small local model | small Claude model | larger Claude model | small local model | larger Claude model | both |
 | `aws` (optional, section 12) | open model on Bedrock | Claude on Bedrock | Claude on Bedrock | open model on Bedrock | Claude on Bedrock | AWS credentials |
 
-- The profile is chosen with an environment variable, for example `LLM_PROFILE=mixed`. The model names are examples; each profile file pins exact versions.
+- The profile is chosen with an environment variable, for example `LLM_PROFILE=mixed`; it defaults to `ollama`. The model names are examples; each profile file pins exact versions.
+- **Build on `ollama`, then measure with Claude.** The system is built and run day to day on the free `ollama` profile. Once it works end to end, API credits are added and the evals run on `anthropic` (the quality baseline) and `mixed`. Prompts and graphs that work on small local models tend to be robust on stronger ones.
 - **`mixed` is the profile the evals are expected to point to:** open models where they hold up (classification and simulation), Claude on the agentic and customer-facing steps. Which steps actually move is decided by the profile comparison in section 10, not in advance.
 - Every trace carries the profile and the alias as metadata, so Langfuse scores, cost and latency can be split by both.
 - Profiles can also set **fallbacks** (for example `reasoning` falls back from the Anthropic API to Bedrock if it fails or rate-limits) and per-alias budgets and rate limits.
@@ -290,7 +291,7 @@ stateDiagram-v2
 ### How the automatic run works
 
 - **Trigger.** Creating a case (from any source) inserts the case and a `queued` investigation in **one transaction**, then sends a Postgres `NOTIFY` to wake the workers. No separate message broker is needed for the POC.
-- **Workers.** A small pool of background workers in the agent service (`MAX_PARALLEL_INVESTIGATIONS`, default 3; use 1 with Ollama). Each worker claims the oldest queued job with `SELECT … FOR UPDATE SKIP LOCKED`, so two workers never take the same job, and jobs survive a restart. If a worker dies mid-run, the job is retried and LangGraph resumes from the last checkpoint.
+- **Workers.** A small pool of background workers in the agent service (`MAX_PARALLEL_INVESTIGATIONS`, default 1 for the `ollama` profile, 3 with Claude). Each worker claims the oldest queued job with `SELECT … FOR UPDATE SKIP LOCKED`, so two workers never take the same job, and jobs survive a restart. If a worker dies mid-run, the job is retried and LangGraph resumes from the last checkpoint.
 - **One active investigation per case.** Clicking Investigate while one is queued or running just opens the existing one.
 - **Which issue types run automatically.** `AUTO_INVESTIGATE_TYPES=card_decline,missed_payment,failed_direct_debit`. Cases of other types stop after triage and are marked `needs_manual`.
 - **Later.** If volume grows, the Postgres queue can be swapped for RabbitMQ or SQS without changing the graphs.
@@ -667,7 +668,7 @@ flowchart LR
 | `ollama` | | | | | | |
 
 - An alias moves to a cheaper model only if its own scores stay within an agreed margin (for example triage accuracy drops by at most 2 points). The `judge` alias stays on the strongest model available in each profile, so a weaker model is never graded by an even weaker one.
-- In CI, the eval job starts the Compose stack and uses the Anthropic API (the key is a GitHub Actions secret). Ollama models are usually too slow for free CI runners, so the `ollama` and `mixed` profiles are evaluated locally.
+- While building, CI runs only unit tests (graphs tested with a fake LLM that returns scripted responses) and evals run locally on `ollama`. Once API credits are added, the CI eval job starts the Compose stack and uses the Anthropic API (the key is a GitHub Actions secret); the job is skipped while the secret does not exist. Ollama models are usually too slow for free CI runners, so the `ollama` and `mixed` profiles are always evaluated locally.
 
 ## 11. Local runtime (Docker Compose)
 
@@ -686,7 +687,6 @@ flowchart TB
 
         subgraph llm["LLM gateway"]
             litellm["litellm-proxy :4000"]
-            ollama["ollama :11434<br/>profile: ollama"]
         end
 
         subgraph obs["Langfuse (self-hosted)"]
@@ -699,7 +699,8 @@ flowchart TB
         end
     end
 
-    anthropic[("Anthropic API")]
+    ollama[("Ollama :11434<br/>native on the host (default)<br/>or container: profile ollama")]
+    anthropic[("Anthropic API<br/>paid, optional")]
 
     browser --> console
     browser --> capp
@@ -709,8 +710,8 @@ flowchart TB
     agents --> pg
     banking --> pg
     agents --> litellm
-    litellm --> anthropic
-    litellm -.-> ollama
+    litellm --> ollama
+    litellm -.-> anthropic
     agents -.-> lf_web
     lf_web --> lf_pg
     lf_web --> lf_ch
@@ -719,11 +720,11 @@ flowchart TB
     lf_worker --> lf_minio
 ```
 
-- `docker compose up` starts everything except Ollama. `docker compose --profile ollama up` adds Ollama, and `LLM_PROFILE=ollama` or `LLM_PROFILE=mixed` points LiteLLM at it. (Compose profiles choose which containers run; `LLM_PROFILE` chooses the LiteLLM config. They are separate settings.)
+- **Ollama runs natively on the Mac** by default, because it is much faster there (it uses the GPU) than inside Docker. Install it once, run `make models` (`ollama pull` for the models in the profile), and LiteLLM reaches it at `host.docker.internal:11434` (`OLLAMA_BASE_URL`). On machines without a usable GPU, `docker compose --profile ollama up` starts an `ollama` container instead. (Compose profiles choose which containers run; `LLM_PROFILE` chooses the LiteLLM config. They are separate settings.)
+- The local models need memory: roughly 5 GB for a small 8B model and around 10 GB for a 14B one. On a Mac with 16 GB, use smaller models for `reasoning` or stop other heavy containers.
 - Postgres uses an image with the **pgvector** extension (for example `pgvector/pgvector:pg16`).
-- The only secret is `ANTHROPIC_API_KEY`, read from a git-ignored `.env` file. Not needed with the `ollama` profile; the `mixed` profile needs both the key and Ollama.
+- No secret is needed with the default `ollama` profile. `ANTHROPIC_API_KEY` (an API key from the Claude Console, not a Claude subscription) is read from a git-ignored `.env` file for the `anthropic` and `mixed` profiles; `mixed` also needs Ollama.
 - Self-hosted Langfuse brings its own Postgres, ClickHouse, Redis and MinIO; keep them separate from the app's Postgres so either can be reset independently.
-- On a Mac, Ollama runs much faster natively (using the GPU) than inside Docker. In that case skip the `ollama` container and point LiteLLM at `host.docker.internal:11434`.
 - The workers and the customer simulator run inside the `agent-service` container for the POC. They can later move to their own containers (same image, different start command) to scale separately from the API.
 
 ## 12. Optional later: AWS deployment
@@ -782,12 +783,12 @@ claude-poc/
 ├── infra/
 │   ├── docker-compose.yml
 │   ├── litellm/
-│   │   ├── anthropic.yaml   # default profile
-│   │   ├── ollama.yaml      # free local profile
+│   │   ├── ollama.yaml      # default profile, free, local
+│   │   ├── anthropic.yaml   # paid, quality baseline for evals
 │   │   ├── mixed.yaml       # open models for triage/simulator, Claude for the rest
 │   │   └── aws.yaml         # optional, Bedrock
 │   └── terraform/           # optional, later
-├── .env.example          # ANTHROPIC_API_KEY, LLM_PROFILE, AUTO_INVESTIGATE_TYPES, SIMULATION_ENABLED, Langfuse keys
+├── .env.example          # LLM_PROFILE, OLLAMA_BASE_URL, ANTHROPIC_API_KEY (optional), AUTO_INVESTIGATE_TYPES, SIMULATION_ENABLED, Langfuse keys
 └── .github/workflows/
 ```
 
@@ -798,7 +799,7 @@ claude-poc/
 Questions raised while designing, with short answers. Details are in the sections above.
 
 **Are all these technologies free to use (for example AWS Bedrock and Langfuse)?**
-Almost everything is free and open source: LangGraph, LiteLLM, FastAPI, Spring Boot, Angular, PostgreSQL, Docker, Terraform, and Langfuse when self-hosted (Langfuse Cloud also has a free tier). The paid parts are LLM tokens (Anthropic API or Bedrock, pay per token, no permanent free tier) and AWS hosting (hourly charges). That is why the design is local-first: running in Docker Compose, the only cost is tokens, and the Ollama profile removes even that.
+Almost everything is free and open source: LangGraph, LiteLLM, FastAPI, Spring Boot, Angular, PostgreSQL, Docker, Terraform, and Langfuse when self-hosted (Langfuse Cloud also has a free tier). The paid parts are LLM tokens (Anthropic API or Bedrock, pay per token, no permanent free tier) and AWS hosting (hourly charges). That is why the design is local-first: running in Docker Compose with the default `ollama` profile costs nothing, and Claude tokens are paid only once the `anthropic` or `mixed` profile is used for evals and demos.
 
 **Does all code for all apps go in the same repo, and how do we start everything?**
 Yes, one repo, with one folder per app (`agent-service`, `banking-service`, `frontend`) plus `infra/`. Each app keeps its own build tool and Dockerfile, and CI workflows run per folder. There are two ways to start: `make up` runs everything in Docker Compose (demos, evals); `make infra` runs only Postgres, LiteLLM and Langfuse in Docker while you run the app you are working on natively with hot reload. Apps read all settings from environment variables, so the same code runs both ways.
@@ -872,8 +873,14 @@ Choosing a model is a decision we measure, not one we hard-code. All LLM calls g
 **What is a profile here, and does every agent always use the same provider?**
 A profile is one LiteLLM config file that maps the role aliases (`triage`, `assistant`, `reasoning`, `simulator`, `judge`) to real models, chosen at startup with `LLM_PROFILE`. The code only ever names an alias. A profile is not tied to one provider: `anthropic` and `ollama` use one each, while `mixed` sends triage and simulated customers to local open models and the agentic and customer-facing steps (and the judge) to Claude. Per-step aliases are what make that possible.
 
-**What is Ollama, and why is `anthropic` the default profile?**
-Ollama is a free tool for running open-weight models locally, a bit like Docker for LLMs: `ollama pull` downloads a model, and a local server on port 11434 exposes an OpenAI-compatible API that LiteLLM calls like any provider. It handles compressed model files, the Mac's GPU and model loading. Nothing leaves the machine and there is no per-token cost, but laptop hardware limits it to small and medium models that are weaker and slower at multi-step tool calling. Alternatives: LM Studio, llama.cpp, vLLM (for GPU servers). `anthropic` is the default because the agentic steps work reliably out of the box (a weak model makes the design look broken), it is the baseline the other profiles are measured against, it runs on any machine with just an API key, it is fast enough for parallel investigations, CI uses it anyway, and its cost at POC scale is small. Switching is one environment variable, and `mixed` may become the default once the evals have run.
+**What is Ollama?**
+Ollama is a free tool for running open-weight models locally, a bit like Docker for LLMs: `ollama pull` downloads a model, and a local server on port 11434 exposes an OpenAI-compatible API that LiteLLM calls like any provider. It handles compressed model files, the Mac's GPU and model loading. Nothing leaves the machine and there is no per-token cost, but laptop hardware limits it to small and medium models that are weaker and slower at multi-step tool calling. Alternatives: LM Studio, llama.cpp, vLLM (for GPU servers).
+
+**Which profile is the default, and why?**
+`ollama`, so the whole system can be built and run with no API credits. The trade-offs are accepted on purpose: small local models are weaker and slower at multi-step tool calling, so investigations run one at a time, and when an agent misbehaves it can be the model rather than the code. Graph logic is therefore unit-tested with a fake LLM that returns scripted responses, so code bugs and model weakness are not confused. Once the system works end to end, API credits are added and the evals run on `anthropic` as the quality baseline and on `mixed`; the CI eval gate is switched on at the same time. An earlier version of the design made `anthropic` the default for reliability out of the box; building first for free won. `mixed` may become the default after the evals.
+
+**Can a Claude subscription be used for the `anthropic` profile?**
+No. A Claude Pro or Max subscription covers using Claude yourself (claude.ai, the desktop app, Claude Code, including building this project with Claude Code). Our own software calling Claude needs an **API key** from the Claude Console, billed separately per token from prepaid credits; a subscription login cannot be used by third-party apps. To get one: in the Console add a payment method and a few dollars of credit, set a low monthly spend limit, create a key per use (for example one for local, one for GitHub Actions), and copy it at once because it is shown only once. It goes in the git-ignored `.env` as `ANTHROPIC_API_KEY`, and only the LiteLLM container reads it.
 
 **What are evals?**
 Automated tests for LLM behaviour. Because LLM output varies and is often partly right, evals run the system over many examples and score the results instead of checking one exact answer, then compare averages between versions. The parts: a **dataset** (inputs with expected results; here, scenarios with the expected category, root cause and outcome), a **run** over every item, **scorers** (code checks, LLM-as-judge, human review) and **results** stored in Langfuse. They act as a quality gate on every change, compare model profiles, and grow as corrected ops reviews become new dataset items. **Offline** evals run before release on a fixed dataset; **online** evals score live traffic (👍/👎, the judge on real answers, ops reviews). The design uses both.
