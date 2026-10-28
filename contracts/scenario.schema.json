@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claude-poc.local/contracts/scenario.schema.json",
+  "title": "Scenario",
+  "description": "One eval or simulation scenario: the incident the banking service sets up, how the simulated customer behaves, and the expected results. The `expected` block is the answer key: it is used by scorers only and must never reach an agent, a tool or a prompt. The shared enums in $defs are also referenced by banking-api.yaml and agent-api.yaml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "incident", "persona", "expected"],
+  "properties": {
+    "id": {
+      "description": "Stable identifier, also the file name without extension.",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "incident": { "$ref": "#/$defs/Incident" },
+    "complaint": {
+      "description": "Fixed complaint text for copilot-only evals and simulated email cases. Optional: the simulated customer writes its own messages.",
+      "type": "string"
+    },
+    "persona": { "$ref": "#/$defs/Persona" },
+    "conversation_script": {
+      "description": "Fixed customer turns for repeatable assistant evals (no simulated customer).",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    },
+    "expected": { "$ref": "#/$defs/Expected" }
+  },
+  "$defs": {
+    "IssueType": {
+      "description": "Triage categories, shared by both agents.",
+      "type": "string",
+      "enum": ["card_decline", "missed_payment", "failed_direct_debit", "other"]
+    },
+    "RootCause": {
+      "description": "Root-cause codes. A diagnosis is scored by comparing (issue_type, root_cause) with the scenario. `unknown` is for escalations and cases with no conclusion.",
+      "type": "string",
+      "enum": [
+        "card_frozen_by_customer",
+        "insufficient_funds",
+        "card_expired",
+        "contactless_limit_exceeded",
+        "merchant_category_blocked",
+        "fraud_rule_triggered",
+        "daily_payment_limit_exceeded",
+        "payee_account_closed",
+        "mandate_cancelled_by_customer",
+        "account_closed_by_originator",
+        "online_payments_disabled",
+        "card_lost_or_stolen",
+        "account_not_active",
+        "invalid_payee_details",
+        "no_mandate",
+        "payer_account_closed",
+        "unknown"
+      ]
+    },
+    "ExpectedOutcome": {
+      "description": "`self_serve`: the assistant should resolve it. `needs_human`: the assistant should hand off.",
+      "type": "string",
+      "enum": ["self_serve", "needs_human"]
+    },
+    "Incident": {
+      "description": "What POST /simulation/incidents on the banking service is asked to set up.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "root_cause"],
+      "properties": {
+        "type": { "$ref": "#/$defs/IssueType" },
+        "root_cause": { "$ref": "#/$defs/RootCause" },
+        "params": {
+          "description": "Optional scenario-specific settings passed through to the simulation module (for example a merchant category or an amount).",
+          "type": "object"
+        }
+      }
+    },
+    "Persona": {
+      "description": "Hints for the simulated customer. It only knows what a real customer would know.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["knows"],
+      "properties": {
+        "vagueness": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" },
+        "patience": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" },
+        "tone": { "type": "string", "examples": ["polite", "frustrated", "anxious"] },
+        "phrasing": {
+          "description": "Example ways this customer describes the problem.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "knows": {
+          "description": "Facts the customer knows and may share (never the root cause unless a real customer would know it).",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "max_turns": { "type": "integer", "minimum": 1, "maximum": 20, "default": 6 }
+      }
+    },
+    "Expected": {
+      "description": "Answer key for scorers only.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue_type", "root_cause", "outcome"],
+      "properties": {
+        "issue_type": { "$ref": "#/$defs/IssueType" },
+        "root_cause": { "$ref": "#/$defs/RootCause" },
+        "outcome": { "$ref": "#/$defs/ExpectedOutcome" }
+      }
+    }
+  }
+}

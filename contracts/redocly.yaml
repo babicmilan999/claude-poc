@@ -1,0 +1,10 @@
+extends:
+  - recommended
+rules:
+  # The POC has no authentication on the banking API; the agent API uses a dev-only header.
+  security-defined: off
+  info-license-url: off
+  # Local-first POC: the servers are localhost on purpose.
+  no-server-example.com: off
+  # Plain list endpoints without parameters have no meaningful 4xx.
+  operation-4xx-response: off

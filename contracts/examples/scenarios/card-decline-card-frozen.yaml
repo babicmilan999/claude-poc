@@ -1,0 +1,32 @@
+# Example scenario: the customer froze their own card in the app and forgot.
+id: card-decline-card-frozen
+title: Card declined because the customer froze it
+tags: [card_decline, self_serve]
+incident:
+  type: card_decline
+  root_cause: card_frozen_by_customer
+  params:
+    declined_attempts: 2
+    merchant_mcc: "5411"
+complaint: >-
+  My card was declined twice at the supermarket today. I have money in my
+  account, so what is going on?
+persona:
+  vagueness: medium
+  patience: medium
+  tone: frustrated
+  phrasing:
+    - "my card keeps getting declined"
+    - "it just says declined at the till"
+  knows:
+    - the card was declined twice today at a supermarket
+    - there is enough money in the account
+    - they used the app last week but do not remember changing anything
+  max_turns: 6
+conversation_script:
+  - Why was my card declined at the supermarket?
+  - I don't remember freezing it. How do I fix this?
+expected:
+  issue_type: card_decline
+  root_cause: card_frozen_by_customer
+  outcome: self_serve
