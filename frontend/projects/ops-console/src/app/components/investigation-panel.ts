@@ -41,6 +41,8 @@ export class InvestigationPanel implements OnDestroy {
   readonly investigation = signal<Investigation | null>(null);
   readonly timeline = signal<TimelineState>(EMPTY_TIMELINE);
   readonly live = signal(false);
+  /** The live timeline gave up reconnecting; `reconnect()` resumes after the last event. */
+  readonly streamLost = signal(false);
   readonly error = signal<string | null>(null);
   readonly highlighted = signal<string | null>(null);
   readonly submitting = signal(false);
@@ -79,6 +81,7 @@ export class InvestigationPanel implements OnDestroy {
   private async load(id: string): Promise<void> {
     this.stream?.unsubscribe();
     this.live.set(false);
+    this.streamLost.set(false);
     this.error.set(null);
     this.timeline.set(EMPTY_TIMELINE);
     this.investigation.set(null);
@@ -102,18 +105,25 @@ export class InvestigationPanel implements OnDestroy {
   private follow(id: string): void {
     this.stream?.unsubscribe();
     this.live.set(true);
+    this.streamLost.set(false);
     const after = this.timeline().lastEventId ?? undefined;
     this.stream = this.ops.streamInvestigationEvents(id, after).subscribe({
       next: (event) => this.timeline.update((s) => applyInvestigationEvent(s, event)),
       error: (err) => {
         this.live.set(false);
-        this.error.set(errorMessage(err));
+        this.streamLost.set(true);
+        this.error.set(`Live timeline stopped: ${errorMessage(err)}`);
       },
       complete: async () => {
         this.live.set(false);
         await this.refresh();
       },
     });
+  }
+
+  reconnect(): void {
+    this.error.set(null);
+    this.follow(this.investigationId());
   }
 
   private async refresh(): Promise<void> {

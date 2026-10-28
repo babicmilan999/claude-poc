@@ -1,7 +1,7 @@
 import { DatePipe, JsonPipe } from '@angular/common';
 import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { CaseDetail, Investigation, OpsApi, errorMessage, humanize } from '@poc/api-client';
+import { ApiError, CaseDetail, Investigation, OpsApi, errorMessage, humanize } from '@poc/api-client';
 import { EvidenceList } from '../components/evidence-list';
 import { InvestigationPanel } from '../components/investigation-panel';
 import { Transcript } from '../components/transcript';
@@ -164,7 +164,14 @@ export class CaseDetailPage {
       this.selectedId.set(inv.id);
       await this.load();
     } catch (err) {
-      this.error.set(errorMessage(err));
+      if (err instanceof ApiError && err.status === 409) {
+        // The case changed under us (a run started, or it was resolved): show why, and
+        // reload so the buttons match the server's state.
+        await this.load();
+        this.error.set(`Not started: ${err.problem.detail ?? err.problem.title}`);
+      } else {
+        this.error.set(errorMessage(err));
+      }
     } finally {
       this.busy.set(false);
     }

@@ -16,7 +16,23 @@ export interface SseMessage {
   retry?: number;
 }
 
-/** A non-2xx response, with its `application/problem+json` body when there is one. */
+const STATUS_TITLES: Record<number, string> = {
+  400: 'Bad request',
+  401: 'Unauthorized',
+  404: 'Not found',
+  409: 'Conflict',
+  422: 'Invalid request',
+  500: 'Internal server error',
+  502: 'Bad gateway',
+  503: 'Service unavailable',
+  504: 'Gateway timeout',
+};
+
+/**
+ * A non-2xx response, with its `application/problem+json` body when there is one. Bodies
+ * that are not problem details (FastAPI's `{"detail": "Not Found"}` for an unknown route,
+ * a proxy's HTML error page) still give a usable title.
+ */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -27,17 +43,40 @@ export class ApiError extends Error {
   }
 
   static async fromResponse(res: Response): Promise<ApiError> {
-    let problem: Problem = { title: res.statusText || `HTTP ${res.status}`, status: res.status };
+    const fallback = res.statusText || STATUS_TITLES[res.status] || `HTTP ${res.status}`;
+    let problem: Problem = { title: fallback, status: res.status };
     try {
-      const body = (await res.json()) as Partial<Problem>;
+      const body = (await res.json()) as Partial<Problem> & { detail?: unknown };
       if (body && typeof body.title === 'string') {
-        problem = { ...problem, ...body } as Problem;
+        problem = { ...problem, ...body, status: res.status } as Problem;
+      } else if (body && typeof body.detail === 'string') {
+        problem = { title: body.detail, status: res.status };
       }
     } catch {
       // not JSON; keep the status text
     }
     return new ApiError(res.status, problem);
   }
+}
+
+/** The agent service could not be reached, or the connection dropped mid-response. */
+export class NetworkError extends Error {
+  constructor(
+    readonly url: string,
+    override readonly cause?: unknown,
+  ) {
+    super(`Cannot reach the agent service (${url})`);
+    this.name = 'NetworkError';
+  }
+}
+
+/** Statuses a proxy returns while the agent service restarts: worth retrying a stream. */
+const TRANSIENT_STATUSES = [502, 503, 504];
+
+/** True for errors a stream should reconnect after: network errors and 502/503/504. */
+export function isTransientError(err: unknown): boolean {
+  if (err instanceof ApiError) return TRANSIENT_STATUSES.includes(err.status);
+  return true;
 }
 
 /**
@@ -121,7 +160,8 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator
 /**
  * Opens one SSE request with `fetch` (so it can be a POST with a body, and can send
  * headers such as `X-Customer-Id` or `Last-Event-ID`). Unsubscribing aborts the request.
- * Errors with `ApiError` on a non-2xx response.
+ * Errors with `ApiError` on a non-2xx response, `NetworkError` when the request fails or
+ * the connection drops.
  */
 export function sseRequest(fetchFn: FetchFn, url: string, init: RequestInit = {}): Observable<SseMessage> {
   return new Observable<SseMessage>((subscriber) => {
@@ -130,12 +170,21 @@ export function sseRequest(fetchFn: FetchFn, url: string, init: RequestInit = {}
     headers.set('Accept', 'text/event-stream');
     (async () => {
       try {
-        const res = await fetchFn(url, { ...init, headers, signal: controller.signal });
+        let res: Response;
+        try {
+          res = await fetchFn(url, { ...init, headers, signal: controller.signal });
+        } catch (err) {
+          throw new NetworkError(url, err);
+        }
         if (!res.ok) throw await ApiError.fromResponse(res);
         if (!res.body) throw new Error('SSE response has no body');
-        for await (const msg of readSse(res.body)) {
-          if (subscriber.closed) return;
-          subscriber.next(msg);
+        try {
+          for await (const msg of readSse(res.body)) {
+            if (subscriber.closed) return;
+            subscriber.next(msg);
+          }
+        } catch (err) {
+          throw new NetworkError(url, err);
         }
         subscriber.complete();
       } catch (err) {
@@ -157,13 +206,20 @@ export interface ResumableSseOptions {
   /** Reconnects in a row without receiving anything. Default 5. */
   maxRetries?: number;
   headers?: HeadersInit;
+  /**
+   * Asked when the stream closed normally without a final message. Resolving `true` (the
+   * run has stopped anyway, e.g. the final event came before `lastEventId`) completes the
+   * stream instead of reconnecting. Errors count as `false`.
+   */
+  hasStopped?: () => Promise<boolean>;
 }
 
 /**
  * A resumable GET stream (the investigation timeline). Tracks the last `id:` seen; when
  * the connection drops or closes before a final message, reconnects with
  * `Last-Event-ID`, so the server replays only what was missed. Completes after the
- * server closes the stream following a final message. HTTP errors (4xx/5xx) are not retried.
+ * server closes the stream following a final message. HTTP errors (4xx/5xx) are not
+ * retried, except 502/503/504 (a proxy in front of a restarting service).
  */
 export function resumableSse(fetchFn: FetchFn, url: string, options: ResumableSseOptions): Observable<SseMessage> {
   return new Observable<SseMessage>((subscriber) => {
@@ -179,22 +235,33 @@ export function resumableSse(fetchFn: FetchFn, url: string, options: ResumableSs
       const headers = new Headers(options.headers);
       if (lastEventId !== undefined) headers.set('Last-Event-ID', lastEventId);
       let receivedAny = false;
-      const reconnectOrFail = (err?: unknown) => {
-        if (subscriber.closed) return;
-        if (sawFinal) {
-          subscriber.complete();
-          return;
-        }
-        if (err instanceof ApiError) {
-          subscriber.error(err);
-          return;
-        }
+      const reconnect = (err?: unknown) => {
         failures = receivedAny ? 1 : failures + 1;
         if (failures > maxRetries) {
           subscriber.error(err ?? new Error('SSE stream closed before the run stopped'));
           return;
         }
         timer = setTimeout(connect, retryDelay);
+      };
+      const onEnd = async (err?: unknown) => {
+        if (subscriber.closed) return;
+        if (sawFinal) {
+          subscriber.complete();
+          return;
+        }
+        if (err !== undefined && !isTransientError(err)) {
+          subscriber.error(err);
+          return;
+        }
+        if (err === undefined && options.hasStopped) {
+          const stopped = await options.hasStopped().catch(() => false);
+          if (subscriber.closed) return;
+          if (stopped) {
+            subscriber.complete();
+            return;
+          }
+        }
+        reconnect(err);
       };
       inner = sseRequest(fetchFn, url, { method: 'GET', headers }).subscribe({
         next: (msg) => {
@@ -204,8 +271,8 @@ export function resumableSse(fetchFn: FetchFn, url: string, options: ResumableSs
           if (options.isFinal(msg)) sawFinal = true;
           subscriber.next(msg);
         },
-        error: (err) => reconnectOrFail(err),
-        complete: () => reconnectOrFail(),
+        error: (err) => void onEnd(err),
+        complete: () => void onEnd(),
       });
     };
     connect();

@@ -17,14 +17,18 @@ export class CustomerSession {
   private readonly stored = this.restore();
   readonly customer = signal<CustomerSummary | null>(this.stored.customer);
   readonly conversationId = signal<string | null>(this.stored.conversationId);
+  /** Why the app logged out on its own (shown on "log in as"); not stored. */
+  readonly notice = signal<string | null>(null);
 
   logIn(customer: CustomerSummary): void {
+    this.notice.set(null);
     this.customer.set(customer);
     this.conversationId.set(null);
     this.save();
   }
 
-  logOut(): void {
+  logOut(notice: string | null = null): void {
+    this.notice.set(notice);
     this.customer.set(null);
     this.conversationId.set(null);
     this.save();

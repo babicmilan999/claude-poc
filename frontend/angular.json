@@ -54,6 +54,38 @@
               "optimization": false,
               "extractLicenses": false,
               "sourceMap": true
+            },
+            "real": {
+              "budgets": [
+                {
+                  "type": "initial",
+                  "maximumWarning": "500kB",
+                  "maximumError": "1MB"
+                },
+                {
+                  "type": "anyComponentStyle",
+                  "maximumWarning": "4kB",
+                  "maximumError": "8kB"
+                }
+              ],
+              "outputHashing": "all",
+              "fileReplacements": [
+                {
+                  "replace": "projects/customer-app/src/environments/environment.ts",
+                  "with": "projects/customer-app/src/environments/environment.real.ts"
+                }
+              ]
+            },
+            "real-development": {
+              "optimization": false,
+              "extractLicenses": false,
+              "sourceMap": true,
+              "fileReplacements": [
+                {
+                  "replace": "projects/customer-app/src/environments/environment.ts",
+                  "with": "projects/customer-app/src/environments/environment.real.ts"
+                }
+              ]
             }
           },
           "defaultConfiguration": "production"
@@ -66,6 +98,9 @@
             },
             "development": {
               "buildTarget": "customer-app:build:development"
+            },
+            "real": {
+              "buildTarget": "customer-app:build:real-development"
             }
           },
           "defaultConfiguration": "development",
@@ -129,6 +164,38 @@
               "optimization": false,
               "extractLicenses": false,
               "sourceMap": true
+            },
+            "real": {
+              "budgets": [
+                {
+                  "type": "initial",
+                  "maximumWarning": "500kB",
+                  "maximumError": "1MB"
+                },
+                {
+                  "type": "anyComponentStyle",
+                  "maximumWarning": "4kB",
+                  "maximumError": "8kB"
+                }
+              ],
+              "outputHashing": "all",
+              "fileReplacements": [
+                {
+                  "replace": "projects/ops-console/src/environments/environment.ts",
+                  "with": "projects/ops-console/src/environments/environment.real.ts"
+                }
+              ]
+            },
+            "real-development": {
+              "optimization": false,
+              "extractLicenses": false,
+              "sourceMap": true,
+              "fileReplacements": [
+                {
+                  "replace": "projects/ops-console/src/environments/environment.ts",
+                  "with": "projects/ops-console/src/environments/environment.real.ts"
+                }
+              ]
             }
           },
           "defaultConfiguration": "production"
@@ -141,6 +208,9 @@
             },
             "development": {
               "buildTarget": "ops-console:build:development"
+            },
+            "real": {
+              "buildTarget": "ops-console:build:real-development"
             }
           },
           "defaultConfiguration": "development",

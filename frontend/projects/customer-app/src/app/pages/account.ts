@@ -1,7 +1,7 @@
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { CustomerApi, CustomerOverview, errorMessage } from '@poc/api-client';
+import { ApiError, CustomerApi, CustomerOverview, errorMessage } from '@poc/api-client';
 
 /** Minimal account view: accounts, cards with their status, recent transactions. */
 @Component({
@@ -9,7 +9,7 @@ import { CustomerApi, CustomerOverview, errorMessage } from '@poc/api-client';
   imports: [CurrencyPipe, DatePipe, RouterLink],
   template: `
     @if (error()) {
-      <p class="error">{{ error() }}</p>
+      <p class="error">{{ error() }} <button type="button" class="link" (click)="load()">Try again</button></p>
     }
     @if (overview(); as o) {
       <section class="card">
@@ -53,11 +53,21 @@ export class AccountPage implements OnInit {
   readonly overview = signal<CustomerOverview | null>(null);
   readonly error = signal<string | null>(null);
 
-  async ngOnInit(): Promise<void> {
+  ngOnInit(): Promise<void> {
+    return this.load();
+  }
+
+  async load(): Promise<void> {
+    this.error.set(null);
     try {
       this.overview.set(await this.customer.getMyOverview());
     } catch (err) {
-      this.error.set(errorMessage(err));
+      // 502: the agent service could not reach the banking service; 401 logs out.
+      this.error.set(
+        err instanceof ApiError && err.status === 502
+          ? 'Your account details are not available right now.'
+          : errorMessage(err),
+      );
     }
   }
 }

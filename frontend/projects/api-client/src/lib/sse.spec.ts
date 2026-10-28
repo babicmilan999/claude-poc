@@ -1,5 +1,5 @@
 import { firstValueFrom, toArray } from 'rxjs';
-import { ApiError, FetchFn, SseMessage, readSse, resumableSse, sseRequest } from './sse';
+import { ApiError, FetchFn, NetworkError, SseMessage, readSse, resumableSse, sseRequest } from './sse';
 
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -125,7 +125,8 @@ describe('resumableSse', () => {
     const err = await firstValueFrom(
       resumableSse(fetchFn, '/e', { isFinal: () => false, retryDelayMs: 0, maxRetries: 2 }),
     ).catch((e) => e);
-    expect(err).toBeInstanceOf(TypeError);
+    expect(err).toBeInstanceOf(NetworkError);
+    expect(err.cause).toBeInstanceOf(TypeError);
     expect(calls).toBe(3);
   });
 

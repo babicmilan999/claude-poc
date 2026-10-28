@@ -11,10 +11,12 @@ export function opsConsoleProviders(api: AgentApiConfig, customerAppUrl = enviro
   return [provideAgentApi(api), { provide: CUSTOMER_APP_URL, useValue: customerAppUrl }];
 }
 
-export const appConfig: ApplicationConfig = {
-  providers: [
-    provideBrowserGlobalErrorListeners(),
-    provideRouter(routes, withComponentInputBinding()),
-    ...opsConsoleProviders(environment.api),
-  ],
-};
+export function opsConsoleConfig(api: AgentApiConfig, customerAppUrl = environment.customerAppUrl): ApplicationConfig {
+  return {
+    providers: [
+      provideBrowserGlobalErrorListeners(),
+      provideRouter(routes, withComponentInputBinding()),
+      ...opsConsoleProviders(api, customerAppUrl),
+    ],
+  };
+}

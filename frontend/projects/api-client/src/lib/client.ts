@@ -1,4 +1,4 @@
-import { Observable, defer, map, repeat, retry, timer } from 'rxjs';
+import { Observable, catchError, defer, map, repeat, retry, throwError, timer } from 'rxjs';
 import {
   Case,
   CaseDetail,
@@ -23,7 +23,16 @@ import {
   SimulatedCustomer,
   SimulationRequest,
 } from './models';
-import { ApiError, FetchFn, SseMessage, parseEventData, resumableSse, sseRequest } from './sse';
+import {
+  ApiError,
+  FetchFn,
+  NetworkError,
+  SseMessage,
+  isTransientError,
+  parseEventData,
+  resumableSse,
+  sseRequest,
+} from './sse';
 
 export interface ApiTransportConfig {
   /** Agent service base URL, e.g. `http://localhost:8000`. Empty for same origin. */
@@ -73,7 +82,14 @@ export class ApiTransport {
       headers.set('Content-Type', 'application/json');
       body = JSON.stringify(options.body);
     }
-    const res = await this.config.fetch(this.url(path, options.query), { method, headers, body });
+    const url = this.url(path, options.query);
+    let res: Response;
+    try {
+      res = await this.config.fetch(url, { method, headers, body });
+    } catch (err) {
+      // fetch rejects (TypeError) when the service is down or CORS blocks the response.
+      throw new NetworkError(url, err);
+    }
     if (!res.ok) throw await ApiError.fromResponse(res);
     return (await res.json()) as T;
   }
@@ -89,12 +105,15 @@ export class ApiTransport {
   }
 }
 
-/** Retries a live stream (not resumable) after network errors; HTTP errors are final. */
+/**
+ * Retries a live stream (not resumable) after network errors and 502/503/504; other HTTP
+ * errors are final.
+ */
 function reopenOnDrop<T>(source: Observable<T>, delayMs: number): Observable<T> {
   return source.pipe(
     retry({
       delay: (err) => {
-        if (err instanceof ApiError) throw err;
+        if (!isTransientError(err)) throw err;
         return timer(delayMs);
       },
     }),
@@ -105,12 +124,14 @@ const enc = encodeURIComponent;
 
 /**
  * Customer app endpoints (tags `customer-account`, `customer-chat`). Every call sends the
- * logged-in customer as `X-Customer-Id`.
+ * logged-in customer as `X-Customer-Id`. A 401 (the agent service does not know that
+ * customer, e.g. after a database reset) calls `onUnauthorized`, then rethrows.
  */
 export class CustomerApi {
   constructor(
     private readonly transport: ApiTransport,
     private readonly customerId: () => string | null,
+    private readonly onUnauthorized: (err: ApiError) => void = () => undefined,
   ) {}
 
   private headers(): Record<string, string> {
@@ -119,29 +140,49 @@ export class CustomerApi {
     return { 'X-Customer-Id': id };
   }
 
-  async getMyOverview(): Promise<CustomerOverview> {
-    return this.transport.json('GET', '/me/overview', { headers: this.headers() });
+  private notice401(err: unknown): void {
+    if (err instanceof ApiError && err.status === 401) this.onUnauthorized(err);
   }
 
-  async createConversation(): Promise<Conversation> {
-    return this.transport.json('POST', '/conversations', { headers: this.headers() });
+  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+    try {
+      return await this.transport.json<T>(method, path, { headers: this.headers(), body });
+    } catch (err) {
+      this.notice401(err);
+      throw err;
+    }
   }
 
-  /** Sends a message; the reply streams back as chat events. Unsubscribe to cancel. */
+  /** 502 when the banking service fails. */
+  getMyOverview(): Promise<CustomerOverview> {
+    return this.call('GET', '/me/overview');
+  }
+
+  createConversation(): Promise<Conversation> {
+    return this.call('POST', '/conversations');
+  }
+
+  /**
+   * Sends a message; the reply streams back as chat events. Unsubscribe to cancel. The
+   * stream is not resumable: if it drops, reload the conversation (`GET /conversations/{id}`).
+   */
   sendMessage(conversationId: string, content: string): Observable<ChatEvent> {
     return defer(() =>
       this.transport.sse('POST', `/conversations/${enc(conversationId)}/messages`, {
         headers: this.headers(),
         body: { content },
       }),
-    ).pipe(map((msg) => parseEventData<ChatEvent>(msg)));
+    ).pipe(
+      map((msg) => parseEventData<ChatEvent>(msg)),
+      catchError((err: unknown) => {
+        this.notice401(err);
+        return throwError(() => err);
+      }),
+    );
   }
 
-  async rateMessage(conversationId: string, messageId: number, rating: Rating): Promise<Message> {
-    return this.transport.json('PUT', `/conversations/${enc(conversationId)}/messages/${messageId}/rating`, {
-      headers: this.headers(),
-      body: { rating },
-    });
+  rateMessage(conversationId: string, messageId: number, rating: Rating): Promise<Message> {
+    return this.call('PUT', `/conversations/${enc(conversationId)}/messages/${messageId}/rating`, { rating });
   }
 }
 
@@ -200,13 +241,16 @@ export class OpsApi {
 
   /**
    * The timeline, live: replays stored events after `afterId` (all when omitted), then
-   * streams until the run stops. Reconnects with `Last-Event-ID` after a drop.
+   * streams until the run stops. Reconnects with `Last-Event-ID` (the last `id:` seen)
+   * after a drop. If the server closes the stream without a final event, the
+   * investigation's status decides between reconnecting and completing.
    */
   streamInvestigationEvents(investigationId: string, afterId?: number): Observable<InvestigationEvent> {
     return resumableSse(this.transport.config.fetch, this.transport.url(`/investigations/${enc(investigationId)}/events`), {
       lastEventId: afterId === undefined ? undefined : String(afterId),
       retryDelayMs: this.transport.reconnectDelayMs,
       isFinal: isFinalInvestigationMessage,
+      hasStopped: async () => STOPPED_INVESTIGATION_STATUSES.includes((await this.getInvestigation(investigationId)).status),
     }).pipe(map((msg) => parseEventData<InvestigationEvent>(msg)));
   }
 

@@ -2,6 +2,7 @@ import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import {
+  ApiError,
   Case,
   CaseEvent,
   ISSUE_TYPES,
@@ -164,7 +165,11 @@ export class CaseQueuePage implements OnInit, OnDestroy {
     try {
       await task();
     } catch (err) {
-      this.error.set(errorMessage(err));
+      this.error.set(
+        err instanceof ApiError && err.status === 404
+          ? 'Simulation is turned off in the agent service (SIMULATION_ENABLED=false).'
+          : errorMessage(err),
+      );
     } finally {
       this.busy.set(false);
     }
