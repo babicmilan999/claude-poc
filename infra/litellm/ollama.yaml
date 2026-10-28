@@ -1,0 +1,60 @@
+# LiteLLM profile `ollama` (default, free, local).
+# Maps the five role aliases to pinned local models served by Ollama at
+# OLLAMA_BASE_URL (native on the host by default, or the `ollama` Compose profile).
+# Pull the models with `make models` (LLM_PROFILE=ollama).
+#
+# Memory: ~5 GB for the 8B model, ~10 GB for the 14B one. On a 16 GB machine,
+# point `reasoning` and `judge` at the 8B model or stop other heavy containers.
+
+model_list:
+  - model_name: triage
+    litellm_params:
+      model: ollama_chat/llama3.1:8b-instruct-q4_K_M
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+    model_info:
+      supports_function_calling: true
+
+  - model_name: assistant
+    litellm_params:
+      model: ollama_chat/qwen2.5:14b-instruct-q4_K_M
+      api_base: os.environ/OLLAMA_BASE_URL
+    model_info:
+      supports_function_calling: true
+
+  - model_name: reasoning
+    litellm_params:
+      model: ollama_chat/qwen2.5:14b-instruct-q4_K_M
+      api_base: os.environ/OLLAMA_BASE_URL
+    model_info:
+      supports_function_calling: true
+
+  - model_name: simulator
+    litellm_params:
+      model: ollama_chat/llama3.1:8b-instruct-q4_K_M
+      api_base: os.environ/OLLAMA_BASE_URL
+    model_info:
+      supports_function_calling: true
+
+  - model_name: judge
+    litellm_params:
+      model: ollama_chat/qwen2.5:14b-instruct-q4_K_M
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+    model_info:
+      supports_function_calling: true
+
+litellm_settings:
+  drop_params: true
+  # Local models are slow, especially the first call after loading.
+  request_timeout: 600
+  # No Langfuse (or other) logging from LiteLLM: the agent service sends the traces.
+  success_callback: []
+  failure_callback: []
+  callbacks: []
+
+router_settings:
+  num_retries: 1
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

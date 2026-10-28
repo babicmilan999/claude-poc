@@ -1,0 +1,307 @@
+# Local runtime (docs/architecture.md section 11).
+#
+#   make up       everything (apps + Postgres + LiteLLM + Langfuse)
+#   make infra    only Postgres, LiteLLM and Langfuse; run the apps natively
+#   docker compose -f infra/docker-compose.yml --env-file .env --profile ollama up -d
+#                 also starts an `ollama` container (machines without a usable GPU);
+#                 then set OLLAMA_BASE_URL=http://ollama:11434 in .env
+#
+# Two separate switches: Compose profiles choose which containers run;
+# LLM_PROFILE chooses the LiteLLM config file (infra/litellm/<profile>.yaml).
+#
+# Every value below is a local development default, overridable from .env.
+# None of them is a real secret; `infra/scripts/langfuse-setup.sh` generates
+# random values for the Langfuse ones into .env on first run.
+
+name: claude-poc
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: http://localhost:3000
+  DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-postgres:5432/langfuse
+  SALT: ${LANGFUSE_SALT:-local-dev-salt}
+  # 64 hex characters (openssl rand -hex 32)
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  LANGFUSE_USE_AZURE_BLOB: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+  # The browser uploads media here, so it is the host-mapped MinIO port.
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-myredissecret}
+  REDIS_TLS_ENABLED: "false"
+
+x-langfuse-depends-on: &langfuse-depends-on
+  langfuse-postgres:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+
+services:
+  # --- Application -------------------------------------------------------------
+
+  postgres:
+    # App database: banking, agents, kb (pgvector) and langgraph schemas.
+    image: pgvector/pgvector:0.8.7-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - app_postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  banking-service:
+    build:
+      context: ../banking-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-simulation}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-app}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-app}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    ports:
+      - "8080:8080"
+
+  agent-service:
+    # FastAPI + investigation workers + customer simulator (one container for the POC).
+    build:
+      context: ../agent-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      banking-service:
+        condition: service_started
+      litellm:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
+      BANKING_API_URL: http://banking-service:8080
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev}
+      # Only used as trace metadata; the profile itself is chosen by the litellm container.
+      LLM_PROFILE: ${LLM_PROFILE:-ollama}
+      AUTO_INVESTIGATE_TYPES: ${AUTO_INVESTIGATE_TYPES:-card_decline,missed_payment,failed_direct_debit}
+      MAX_PARALLEL_INVESTIGATIONS: ${MAX_PARALLEL_INVESTIGATIONS:-1}
+      SIMULATION_ENABLED: ${SIMULATION_ENABLED:-true}
+      TRIAGE_CONFIDENCE_THRESHOLD: ${TRIAGE_CONFIDENCE_THRESHOLD:-0.6}
+      LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # Articles are ingested at startup; they live outside the build context.
+      KB_PATH: /app/knowledge-base
+    volumes:
+      - ../knowledge-base:/app/knowledge-base:ro
+    ports:
+      - "8000:8000"
+
+  ops-console:
+    # One Angular workspace, one Dockerfile; APP selects the project to build.
+    build:
+      context: ../frontend
+      args:
+        APP: ops-console
+    restart: unless-stopped
+    depends_on:
+      - agent-service
+    ports:
+      - "4200:80"
+
+  customer-app:
+    build:
+      context: ../frontend
+      args:
+        APP: customer-app
+    restart: unless-stopped
+    depends_on:
+      - agent-service
+    ports:
+      - "4300:80"
+
+  # --- LLM gateway ---------------------------------------------------------------
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.83.14-stable
+    restart: unless-stopped
+    command: ["--config", "/app/profiles/${LLM_PROFILE:-ollama}.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      # Only needed by the anthropic and mixed profiles; never logged.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # LiteLLM's own Langfuse logging stays off: only the agent service sends
+      # traces, so calls are not recorded twice. No LANGFUSE_* variables here.
+      LITELLM_TELEMETRY: "False"
+    volumes:
+      - ./litellm:/app/profiles:ro
+    extra_hosts:
+      # Native Ollama on the host (Linux needs this; Docker Desktop has it built in).
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  ollama:
+    # Optional: only with `--profile ollama`. By default Ollama runs natively on
+    # the host (much faster on a Mac, it uses the GPU).
+    image: ollama/ollama:0.40.12
+    profiles: ["ollama"]
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  # --- Langfuse (self-hosted v3) -------------------------------------------------
+  # Kept separate from the app's Postgres so either can be reset on its own.
+
+  langfuse-web:
+    image: langfuse/langfuse:3.225.15
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-local-dev-nextauth-secret}
+      # Headless first-run setup: creates the org, project, API keys and an admin
+      # user on first start. Filled into .env by infra/scripts/langfuse-setup.sh.
+      LANGFUSE_INIT_ORG_ID: claude-poc
+      LANGFUSE_INIT_ORG_NAME: claude-poc
+      LANGFUSE_INIT_PROJECT_ID: payments-support
+      LANGFUSE_INIT_PROJECT_NAME: payments-support
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    ports:
+      - "3000:3000"
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3.225.15
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+
+  langfuse-postgres:
+    image: postgres:17.11
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
+      POSTGRES_DB: langfuse
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  redis:
+    image: redis:7.4.12
+    restart: unless-stopped
+    command: ["--requirepass", "${LANGFUSE_REDIS_PASSWORD:-myredissecret}", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LANGFUSE_REDIS_PASSWORD:-myredissecret}", "--no-auth-warning", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  minio:
+    # S3-compatible storage for Langfuse events and media. MinIO no longer
+    # publishes images on Docker Hub; Chainguard's free image (as in Langfuse's
+    # own Compose file) only offers `latest`. Pin by digest if reproducibility matters.
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    entrypoint: sh
+    # Creates the `langfuse` bucket before starting the server.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+    ports:
+      - "9090:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 2s
+
+volumes:
+  app_postgres_data:
+  ollama_models:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_redis_data:

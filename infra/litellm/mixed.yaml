@@ -1,0 +1,50 @@
+# LiteLLM profile `mixed`: local open models for classification and simulation,
+# Claude for the agentic and customer-facing steps and the judge.
+# Needs both Ollama (OLLAMA_BASE_URL) and ANTHROPIC_API_KEY.
+# Pull the local models with `make models` (LLM_PROFILE=mixed).
+
+model_list:
+  - model_name: triage
+    litellm_params:
+      model: ollama_chat/llama3.1:8b-instruct-q4_K_M
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+    model_info:
+      supports_function_calling: true
+
+  - model_name: assistant
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: reasoning
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5-20250929
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: simulator
+    litellm_params:
+      model: ollama_chat/llama3.1:8b-instruct-q4_K_M
+      api_base: os.environ/OLLAMA_BASE_URL
+    model_info:
+      supports_function_calling: true
+
+  - model_name: judge
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5-20250929
+      api_key: os.environ/ANTHROPIC_API_KEY
+      temperature: 0
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 600
+  # No Langfuse (or other) logging from LiteLLM: the agent service sends the traces.
+  success_callback: []
+  failure_callback: []
+  callbacks: []
+
+router_settings:
+  num_retries: 2
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
