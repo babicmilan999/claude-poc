@@ -9,9 +9,9 @@ info:
 
     **Conventions**
     - JSON uses `snake_case`. Timestamps are RFC 3339 UTC. Errors are `application/problem+json`.
-    - Customer endpoints identify the customer by the `X-Customer-Id` header, set by the
-      customer app's "log in as" picker (local development only, no real authentication).
-      Ops endpoints have no authentication in the POC.
+    - Customer app endpoints identify the customer by the `X-Customer-Id` header, set by
+      the "log in as" picker (local development only, no real authentication). Ops and
+      shared endpoints have no authentication in the POC.
     - Simulation answer keys (`expected_root_cause`, `expected_outcome`) are stored by the
       service for scoring but are **never returned by any endpoint** of this API.
 
@@ -23,18 +23,37 @@ info:
     replayed, then the stream continues live. The customer chat stream is the response
     to a POST, so the customer app reads it with a fetch-based SSE client.
 
-    **Screen → endpoint map**
+    **Endpoints by audience**
 
-    | App | Screen | Endpoints |
+    The tags are grouped by audience (`x-tagGroups`), and each operation has exactly one
+    tag, so generated clients get one service per group.
+
+    *Customer app* — the logged-in customer acting on their own data. Requires the
+    `X-Customer-Id` header; returns customer-safe fields only (no fraud flags, risk
+    scores, internal codes or full card numbers).
+
+    | Tag | Screen | Endpoints |
     |---|---|---|
-    | customer-app | Log in as | `GET /customers` |
-    | customer-app | Account view | `GET /me/overview` |
-    | customer-app | Chat | `POST /conversations`, `GET /conversations/{id}`, `POST /conversations/{id}/messages` (SSE), `PUT /conversations/{id}/messages/{message_id}/rating` |
-    | customer-app | Watch mode | `GET /conversations?simulated=true&status=open`, `GET /conversations/{id}`, `GET /conversations/{id}/events` (SSE) |
-    | ops-console | Case queue | `GET /cases`, `GET /cases/events` (SSE), `POST /simulation/customers`, `POST /simulation/emails` |
-    | ops-console | Case detail | `GET /cases/{id}`, `GET /investigations/{id}`, `GET /investigations/{id}/events` (SSE or JSON), `POST /investigations/{id}/feedback`, `POST /cases/{id}/investigate`, `POST /cases/{id}/reinvestigate` |
-    | ops-console | Conversations | `GET /conversations`, `GET /conversations/{id}` |
-    | ops-console | New case form | `GET /customers`, `POST /cases` |
+    | `customer-account` | Account view | `GET /me/overview` |
+    | `customer-chat` | Chat | `POST /conversations`, `POST /conversations/{id}/messages` (SSE), `PUT /conversations/{id}/messages/{message_id}/rating` |
+
+    *Ops console* — the ops team working cases. No customer header; full records.
+
+    | Tag | Screen | Endpoints |
+    |---|---|---|
+    | `ops-cases` | Case queue, case detail, new case form | `GET /cases`, `GET /cases/events` (SSE), `POST /cases`, `GET /cases/{id}`, `POST /cases/{id}/investigate`, `POST /cases/{id}/reinvestigate` |
+    | `ops-investigations` | Case detail (timeline, diagnosis, review) | `GET /investigations/{id}`, `GET /investigations/{id}/events` (SSE or JSON), `POST /investigations/{id}/feedback` |
+    | `ops-simulation` | Case queue (Simulate buttons) | `POST /simulation/customers`, `POST /simulation/emails` |
+
+    *Shared* — read by both apps. Not customer-scoped: watch mode and the ops console
+    read any conversation (dev-only, no real authentication).
+
+    | Tag | Used by | Endpoints |
+    |---|---|---|
+    | `shared-customers` | Log in as (customer app), new case form (ops console) | `GET /customers` |
+    | `shared-conversations` | Chat history and watch mode (customer app), conversations list and transcripts (ops console) | `GET /conversations`, `GET /conversations/{id}`, `GET /conversations/{id}/events` (SSE) |
+
+    *Platform* — `GET /health` (`platform`).
   license:
     name: Proprietary (POC)
     identifier: LicenseRef-POC
@@ -42,57 +61,46 @@ servers:
   - url: http://localhost:8000
     description: Local (Docker Compose or native)
 tags:
-  - name: customers
-    description: Customer list and the logged-in customer's own view.
-  - name: conversations
-    description: The in-app assistant.
-  - name: cases
-    description: Cases waiting for the ops team.
-  - name: investigations
-    description: Runs of the ops copilot on a case, and their review.
-  - name: simulation
+  - name: customer-account
+    x-displayName: Account
+    description: The logged-in customer's own account view.
+  - name: customer-chat
+    x-displayName: Chat
+    description: The customer's conversation with the in-app assistant.
+  - name: ops-cases
+    x-displayName: Cases
+    description: Cases waiting for the ops team, and starting investigations.
+  - name: ops-investigations
+    x-displayName: Investigations
+    description: Runs of the ops copilot on a case, their timeline and review.
+  - name: ops-simulation
+    x-displayName: Simulation
     description: Simulated customers and complaints. Only with `SIMULATION_ENABLED=true`; otherwise 404.
-  - name: health
+  - name: shared-customers
+    x-displayName: Customers
+    description: The customer list, for "log in as" and the new case form.
+  - name: shared-conversations
+    x-displayName: Conversations
+    description: Reading conversations and following them live (watch mode, ops spot checks).
+  - name: platform
+    x-displayName: Health
     description: Liveness.
+x-tagGroups:
+  - name: Customer app
+    tags: [customer-account, customer-chat]
+  - name: Ops console
+    tags: [ops-cases, ops-investigations, ops-simulation]
+  - name: Shared
+    tags: [shared-customers, shared-conversations]
+  - name: Platform
+    tags: [platform]
 
 paths:
-  /health:
-    get:
-      tags: [health]
-      operationId: health
-      summary: Liveness check
-      responses:
-        '200':
-          description: The service is up.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status: { type: string, enum: [ok] }
-                  llm_profile: { type: string, examples: [ollama] }
-        '503': { $ref: '#/components/responses/Problem' }
-
-  /customers:
-    get:
-      tags: [customers]
-      operationId: listCustomers
-      summary: List customers
-      description: For the customer app's "log in as" picker and the ops console's new case form.
-      responses:
-        '200':
-          description: Customers.
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/CustomerSummary' }
-        '502': { $ref: '#/components/responses/Problem' }
+  # ===== Customer app: X-Customer-Id required, customer-safe data only =====
 
   /me/overview:
     get:
-      tags: [customers]
+      tags: [customer-account]
       operationId: getMyOverview
       summary: The logged-in customer's account view
       description: Customer-safe fields only (no fraud flags, internal codes or full card numbers).
@@ -107,8 +115,9 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
 
   /conversations:
+    # POST is the customer app's; GET (listing) is shared, tagged shared-conversations.
     post:
-      tags: [conversations]
+      tags: [customer-chat]
       operationId: createConversation
       summary: Start a conversation with the assistant
       parameters:
@@ -121,7 +130,7 @@ paths:
               schema: { $ref: '#/components/schemas/Conversation' }
         '401': { $ref: '#/components/responses/Problem' }
     get:
-      tags: [conversations]
+      tags: [shared-conversations]
       operationId: listConversations
       summary: List conversations
       description: Ops console spot checks, and the customer app's watch mode (`simulated=true&status=open`).
@@ -152,26 +161,11 @@ paths:
               schema: { $ref: '#/components/schemas/ConversationPage' }
         '400': { $ref: '#/components/responses/Problem' }
 
-  /conversations/{conversation_id}:
-    parameters:
-      - $ref: '#/components/parameters/ConversationId'
-    get:
-      tags: [conversations]
-      operationId: getConversation
-      summary: Get a conversation with its messages
-      responses:
-        '200':
-          description: The conversation and its transcript.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ConversationDetail' }
-        '404': { $ref: '#/components/responses/Problem' }
-
   /conversations/{conversation_id}/messages:
     parameters:
       - $ref: '#/components/parameters/ConversationId'
     post:
-      tags: [conversations]
+      tags: [customer-chat]
       operationId: sendMessage
       summary: Send a customer message; the reply streams back
       description: |
@@ -206,7 +200,7 @@ paths:
         required: true
         schema: { type: integer, format: int64 }
     put:
-      tags: [conversations]
+      tags: [customer-chat]
       operationId: rateMessage
       summary: Rate an assistant answer (👍 / 👎)
       description: |
@@ -238,29 +232,11 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
-  /conversations/{conversation_id}/events:
-    parameters:
-      - $ref: '#/components/parameters/ConversationId'
-    get:
-      tags: [conversations]
-      operationId: streamConversationEvents
-      summary: Follow a conversation live (watch mode)
-      description: |
-        SSE stream for watch mode. It first replays the stored messages as `message_created`
-        events (and the current `conversation_status`), then streams live events, including
-        `token`s of an answer in progress. Tokens are not stored, so there is no
-        `Last-Event-ID` resume: after a reconnect the client simply reopens the stream.
-      responses:
-        '200':
-          description: SSE stream of `ChatEvent` objects.
-          content:
-            text/event-stream:
-              schema: { $ref: '#/components/schemas/ChatEvent' }
-        '404': { $ref: '#/components/responses/Problem' }
+  # ===== Ops console: no customer header, full records =====
 
   /cases:
     get:
-      tags: [cases]
+      tags: [ops-cases]
       operationId: listCases
       summary: The case queue
       parameters:
@@ -291,7 +267,7 @@ paths:
               schema: { $ref: '#/components/schemas/CasePage' }
         '400': { $ref: '#/components/responses/Problem' }
     post:
-      tags: [cases]
+      tags: [ops-cases]
       operationId: createCase
       summary: Create a case (new case form)
       description: |
@@ -313,7 +289,7 @@ paths:
 
   /cases/events:
     get:
-      tags: [cases]
+      tags: [ops-cases]
       operationId: streamCaseEvents
       summary: Case queue updates
       description: |
@@ -331,7 +307,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/CaseId'
     get:
-      tags: [cases]
+      tags: [ops-cases]
       operationId: getCase
       summary: Case detail
       responses:
@@ -346,7 +322,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/CaseId'
     post:
-      tags: [cases]
+      tags: [ops-cases]
       operationId: investigateCase
       summary: Investigate (manual run)
       description: |
@@ -375,7 +351,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/CaseId'
     post:
-      tags: [cases]
+      tags: [ops-cases]
       operationId: reinvestigateCase
       summary: Re-investigate from scratch
       description: |
@@ -395,7 +371,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/InvestigationId'
     get:
-      tags: [investigations]
+      tags: [ops-investigations]
       operationId: getInvestigation
       summary: Get an investigation
       responses:
@@ -410,7 +386,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/InvestigationId'
     get:
-      tags: [investigations]
+      tags: [ops-investigations]
       operationId: getInvestigationEvents
       summary: The investigation timeline (live or replayed)
       description: |
@@ -443,7 +419,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/InvestigationId'
     post:
-      tags: [investigations]
+      tags: [ops-investigations]
       operationId: submitFeedback
       summary: Review a diagnosis (accept, correct, reject with hint)
       description: |
@@ -470,7 +446,7 @@ paths:
 
   /simulation/customers:
     post:
-      tags: [simulation]
+      tags: [ops-simulation]
       operationId: simulateCustomer
       summary: Simulate customer (the full journey)
       description: |
@@ -494,7 +470,7 @@ paths:
 
   /simulation/emails:
     post:
-      tags: [simulation]
+      tags: [ops-simulation]
       operationId: simulateEmail
       summary: Simulate email complaint
       description: |
@@ -514,6 +490,79 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
         '502': { $ref: '#/components/responses/Problem' }
+
+  # ===== Shared: read by both apps, not customer-scoped =====
+
+  /customers:
+    get:
+      tags: [shared-customers]
+      operationId: listCustomers
+      summary: List customers
+      description: For the customer app's "log in as" picker and the ops console's new case form.
+      responses:
+        '200':
+          description: Customers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CustomerSummary' }
+        '502': { $ref: '#/components/responses/Problem' }
+
+  /conversations/{conversation_id}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [shared-conversations]
+      operationId: getConversation
+      summary: Get a conversation with its messages
+      responses:
+        '200':
+          description: The conversation and its transcript.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationDetail' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /conversations/{conversation_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [shared-conversations]
+      operationId: streamConversationEvents
+      summary: Follow a conversation live (watch mode)
+      description: |
+        SSE stream for watch mode. It first replays the stored messages as `message_created`
+        events (and the current `conversation_status`), then streams live events, including
+        `token`s of an answer in progress. Tokens are not stored, so there is no
+        `Last-Event-ID` resume: after a reconnect the client simply reopens the stream.
+      responses:
+        '200':
+          description: SSE stream of `ChatEvent` objects.
+          content:
+            text/event-stream:
+              schema: { $ref: '#/components/schemas/ChatEvent' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ===== Platform =====
+
+  /health:
+    get:
+      tags: [platform]
+      operationId: health
+      summary: Liveness check
+      responses:
+        '200':
+          description: The service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  llm_profile: { type: string, examples: [ollama] }
+        '503': { $ref: '#/components/responses/Problem' }
 
 components:
   parameters:
