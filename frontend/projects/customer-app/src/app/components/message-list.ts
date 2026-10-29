@@ -1,5 +1,6 @@
 import { Component, input, output } from '@angular/core';
-import { ChatMessageView, Rating } from '@poc/api-client';
+import { RouterLink } from '@angular/router';
+import { ChatMessageView, Rating, sourceLink } from '@poc/api-client';
 
 export interface RateEvent {
   message: ChatMessageView;
@@ -9,6 +10,7 @@ export interface RateEvent {
 /** The chat transcript: bubbles, streamed text, source links and the 👍 / 👎 buttons. */
 @Component({
   selector: 'ca-message-list',
+  imports: [RouterLink],
   template: `
     @for (m of messages(); track m.id) {
       <div class="msg" [class]="m.role" [attr.data-message-id]="m.id">
@@ -18,10 +20,18 @@ export interface RateEvent {
         @if (m.sources.length) {
           <div class="sources">
             @for (s of m.sources; track $index) {
-              @if (s.kind === 'article' && s.url) {
-                <a class="source" [href]="s.url" target="_blank" rel="noopener">{{ s.title }}</a>
-              } @else {
-                <span class="source data">{{ s.title }}</span>
+              @let link = sourceLink(s);
+              @switch (link.kind) {
+                @case ('external') {
+                  <a class="source" [href]="link.href" target="_blank" rel="noopener">{{ s.title }}</a>
+                }
+                @case ('internal') {
+                  <!-- The agent service's default article URL is /help/<slug>: a placeholder route here. -->
+                  <a class="source" [routerLink]="link.path">{{ s.title }}</a>
+                }
+                @default {
+                  <span class="source data">{{ s.title }}</span>
+                }
               }
             }
           </div>
@@ -68,4 +78,5 @@ export class MessageList {
   readonly rateable = input(false);
   readonly emptyText = input('No messages yet.');
   readonly rate = output<RateEvent>();
+  protected readonly sourceLink = sourceLink;
 }

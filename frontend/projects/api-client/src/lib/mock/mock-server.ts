@@ -138,6 +138,10 @@ export class MockAgentServer {
   private nextCaseEventId = 1;
   private readonly bus = new Bus();
   private readonly running = new Set<Promise<void>>();
+  /** Open SSE streams, so tests can drop them. */
+  private readonly openStreams = new Set<() => void>();
+  /** While set, background runs wait at their next step. */
+  private hold: Promise<void> | null = null;
 
   private readonly customers = new Map<string, MockCustomer>();
   private readonly conversations = new Map<string, ConversationRecord>();
@@ -149,6 +153,30 @@ export class MockAgentServer {
     this.random = options.random ?? Math.random;
     this.autoTypes = options.autoInvestigateTypes ?? AUTO_DEFAULT;
     this.ready = options.seed === false ? Promise.resolve() : this.seed();
+  }
+
+  /**
+   * Test hook: background runs (investigations, simulations) stop at their next step
+   * until the returned function is called. Lets a test drop a stream mid-run.
+   */
+  holdRuns(): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    this.hold = gate;
+    return () => {
+      if (this.hold === gate) this.hold = null;
+      release();
+    };
+  }
+
+  /**
+   * Test hook: cuts every open SSE stream as a network failure would (the reader
+   * errors, no clean close). Clients are expected to reconnect.
+   */
+  dropStreams(): number {
+    const drops = [...this.openStreams];
+    drops.forEach((drop) => drop());
+    return drops.length;
   }
 
   /** Waits until every background run (investigations, simulations) has finished. */
@@ -174,9 +202,10 @@ export class MockAgentServer {
     return items[Math.floor(this.random() * items.length)];
   }
 
-  private pause(factor = 1): Promise<void> {
-    if (this.instant) return Promise.resolve();
-    return new Promise((resolve) => setTimeout(resolve, this.tickMs * factor));
+  private async pause(factor = 1): Promise<void> {
+    while (this.hold) await this.hold;
+    if (this.instant) return;
+    await new Promise((resolve) => setTimeout(resolve, this.tickMs * factor));
   }
 
   private background(task: () => Promise<void>): Promise<void> {
@@ -200,12 +229,20 @@ export class MockAgentServer {
     const encoder = new TextEncoder();
     const cleanups: (() => void)[] = [];
     let closed = false;
+    let drop: (() => void) | undefined;
     const finish = () => {
       closed = true;
+      if (drop) this.openStreams.delete(drop);
       cleanups.splice(0).forEach((fn) => fn());
     };
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
+        drop = () => {
+          if (closed) return;
+          finish();
+          controller.error(new TypeError('network error (mock drop)'));
+        };
+        this.openStreams.add(drop);
         const sink: SseSink = {
           send: (type, data, id) => {
             if (closed) return;

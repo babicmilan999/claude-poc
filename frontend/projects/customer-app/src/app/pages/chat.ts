@@ -1,12 +1,14 @@
 import { Component, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import {
+  ApiError,
   ChatState,
   CustomerApi,
   EMPTY_CHAT,
   SharedApi,
   applyChatEvent,
   chatStateFromDetail,
+  endChatStream,
   errorMessage,
 } from '@poc/api-client';
 import { Subscription } from 'rxjs';
@@ -96,17 +98,44 @@ export class ChatPage implements OnInit, OnDestroy {
         id = (await this.customer.createConversation()).id;
         this.session.setConversation(id);
       }
-      this.stream = this.customer.sendMessage(id, text).subscribe({
+      const conversationId = id;
+      this.stream = this.customer.sendMessage(conversationId, text).subscribe({
         next: (event) => this.state.update((s) => applyChatEvent(s, event)),
-        error: (err) => {
-          this.state.update((s) => ({ ...s, error: errorMessage(err) }));
-          this.sending.set(false);
-        },
-        complete: () => this.sending.set(false),
+        error: (err) => void this.streamEnded(conversationId, err),
+        complete: () => void this.streamEnded(conversationId),
       });
     } catch (err) {
       this.state.update((s) => ({ ...s, error: errorMessage(err) }));
       this.sending.set(false);
+    }
+  }
+
+  /**
+   * The answer stream is not resumable. If it ended before the answer completed (dropped
+   * connection, server error) or the server refused the message, reload what it stored.
+   */
+  private async streamEnded(conversationId: string, err?: unknown): Promise<void> {
+    const { state, incomplete } = endChatStream(this.state());
+    this.state.set(err === undefined ? state : { ...state, error: errorMessage(err) });
+    this.sending.set(false);
+    if (err instanceof ApiError && err.status === 401) return; // logged out
+    if (err instanceof ApiError && err.status === 404) {
+      // The conversation is gone (e.g. the database was reset): start a new one.
+      this.session.setConversation(null);
+      this.state.set({ ...EMPTY_CHAT, error: 'That conversation no longer exists. Send your message again to start a new one.' });
+      return;
+    }
+    // A clean end after a complete answer needs nothing; anything else (409: the
+    // conversation was closed meanwhile; a drop mid-answer) reloads the stored state.
+    if (err === undefined && !incomplete) return;
+    if (this.session.conversationId() !== conversationId) return;
+    try {
+      const stored = chatStateFromDetail(await this.shared.getConversation(conversationId));
+      if (this.session.conversationId() !== conversationId) return;
+      const current = this.state();
+      this.state.set({ ...stored, handoff: current.handoff ?? stored.handoff, error: current.error });
+    } catch {
+      // keep what we have
     }
   }
 

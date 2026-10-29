@@ -55,4 +55,4 @@ jobs:
       - if: ${{ hashFiles('frontend/package-lock.json') != '' }}
         run: make test-frontend
       - if: ${{ hashFiles('frontend/package-lock.json') != '' }}
-        run: cd frontend && npm run build
+        run: cd frontend && npm run build && npm run build:real

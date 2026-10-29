@@ -105,3 +105,14 @@ export function applyChatEvent(state: ChatState, event: ChatEvent): ChatState {
       return state;
   }
 }
+
+/**
+ * The chat stream ended (closed, dropped or failed). Messages still marked `streaming`
+ * never got their `message_completed`; stop the caret. Returns whether any did, in which
+ * case the caller should reload the conversation to get what the server stored.
+ */
+export function endChatStream(state: ChatState): { state: ChatState; incomplete: boolean } {
+  const incomplete = state.messages.some((m) => m.streaming);
+  if (!incomplete) return { state, incomplete };
+  return { state: { ...state, messages: state.messages.map((m) => (m.streaming ? { ...m, streaming: false } : m)) }, incomplete };
+}
