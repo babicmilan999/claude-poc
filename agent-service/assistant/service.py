@@ -149,7 +149,11 @@ class AssistantService:
             if current.outcome is not None:
                 # A new message after 👍 means it was not resolved after all.
                 await self.store.update_conversation(cid, outcome=None)
-            down = await self.store.count_message_ratings(cid, Rating.DOWN)
+            down = [
+                m.id
+                for m in await self.store.list_messages(cid)
+                if m.role == MessageRole.ASSISTANT and m.rating == Rating.DOWN
+            ]
         except BaseException:
             self._busy.discard(cid)
             raise
@@ -179,7 +183,7 @@ class AssistantService:
         self,
         conversation: ConversationRecord,
         message: MessageRecord,
-        down_ratings: int,
+        down_rated: list[int],
         emit: Any,
         queue: asyncio.Queue[Any],
     ) -> None:
@@ -196,7 +200,7 @@ class AssistantService:
             "conversation_id": str(cid),
             "customer_id": str(conversation.customer_id),
             "messages": [HumanMessage(content=message.content, id=f"msg-{message.id}")],
-            "down_ratings": down_ratings,
+            "down_rated": down_rated,
         }
         try:
             async for chunk in self.graph.astream(state_in, config=config, stream_mode="custom"):

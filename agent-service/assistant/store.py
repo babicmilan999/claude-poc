@@ -11,7 +11,7 @@ appear in a record this module returns, so no graph, tool, prompt or API respons
 import json
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol
@@ -91,6 +91,35 @@ class HandoffResult:
     investigation_id: uuid.UUID | None
     notice: MessageRecord
     conversation: ConversationRecord
+
+
+@dataclass(frozen=True)
+class HandoffCaseCopy:
+    """A handoff case for an in-memory case store of another package (runs without a
+    database, where the packages share no `cases` table). The answer key is passed on for
+    scoring only, like the `cases` row in Postgres; it is never shown to an agent."""
+
+    conversation_id: uuid.UUID
+    customer_id: uuid.UUID
+    customer_name: str | None
+    category: IssueType
+    complaint: str
+    summary: str
+    evidence: list[dict[str, Any]]
+    transcript: list[tuple[str, str]]  # (role, content), oldest first, ending with the notice
+    simulated: bool
+    expected_root_cause: RootCause | None
+    expected_outcome: ExpectedOutcome | None
+
+
+@dataclass(frozen=True)
+class HandoffCaseRef:
+    case_id: uuid.UUID
+    investigation_id: uuid.UUID | None
+
+
+HandoffSink = Callable[[HandoffCaseCopy], Awaitable[HandoffCaseRef | None]]
+"""Takes the handoff case into another store; None when that store is not available."""
 
 
 class _Unset:
@@ -177,10 +206,16 @@ class _StoredConversation:
 
 
 class InMemoryConversationStore:
-    """Same behaviour as the SQL store. `cases` and `investigations` are exposed for tests."""
+    """Same behaviour as the SQL store. `cases` and `investigations` are exposed for tests.
 
-    def __init__(self, *, clock: Clock = utc_now) -> None:
+    `handoff_sink`, when set, takes each handoff case (for example into the investigation
+    package's in-memory store, so it is investigated and shown on the case queue); the
+    case then has the id the sink gives it. Without a sink, or when it returns None, the
+    case only lives here."""
+
+    def __init__(self, *, clock: Clock = utc_now, handoff_sink: HandoffSink | None = None) -> None:
         self._clock = clock
+        self.handoff_sink = handoff_sink
         self._conversations: dict[uuid.UUID, _StoredConversation] = {}
         self._next_message_id = 1
         self.cases: list[dict[str, Any]] = []
@@ -302,8 +337,11 @@ class InMemoryConversationStore:
         stored = self._get(new.conversation_id)
         if stored.record.status != ConversationStatus.OPEN:
             raise ConversationClosed(str(new.conversation_id))
-        case_id = uuid.uuid4()
-        investigation_id = uuid.uuid4()
+        ref = await self._forward(new, stored)
+        if stored.record.status != ConversationStatus.OPEN:  # closed while forwarding
+            raise ConversationClosed(str(new.conversation_id))
+        case_id = ref.case_id if ref else uuid.uuid4()
+        investigation_id = ref.investigation_id if ref else uuid.uuid4()
         now = self._clock()
         self.cases.append(
             {
@@ -340,9 +378,34 @@ class InMemoryConversationStore:
             case_id=case_id,
             ended_at=now,
         )
-        self.notifications.append(("investigation_jobs", str(investigation_id)))
-        self.notifications.append((CASE_EVENTS_CHANNEL, case_created_payload(case_id)))
+        if ref is None:  # a forwarded case is announced by the store that took it
+            self.notifications.append(("investigation_jobs", str(investigation_id)))
+            self.notifications.append((CASE_EVENTS_CHANNEL, case_created_payload(case_id)))
         return HandoffResult(case_id, investigation_id, notice, stored.record)
+
+    async def _forward(self, new: NewHandoffCase, stored: _StoredConversation) -> HandoffCaseRef | None:
+        if self.handoff_sink is None:
+            return None
+        transcript = [(m.role.value, m.content) for m in stored.messages]
+        transcript.append((MessageRole.ASSISTANT.value, new.notice))
+        copy = HandoffCaseCopy(
+            conversation_id=new.conversation_id,
+            customer_id=new.customer_id,
+            customer_name=new.customer_name or stored.record.customer_name,
+            category=new.category,
+            complaint=new.complaint,
+            summary=new.summary,
+            evidence=list(new.evidence),
+            transcript=transcript,
+            simulated=stored.record.simulated,
+            expected_root_cause=stored.expected_root_cause,
+            expected_outcome=stored.expected_outcome,
+        )
+        try:
+            return await self.handoff_sink(copy)
+        except Exception:
+            log.exception("handoff case for conversation %s not forwarded; kept here only", new.conversation_id)
+            return None
 
 
 # --- Postgres -------------------------------------------------------------------------

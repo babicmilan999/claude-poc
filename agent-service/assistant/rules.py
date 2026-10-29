@@ -12,7 +12,7 @@ involved and nothing here is shown to the model.
 | `sensitive_topic` | suspected fraud, a vulnerable customer, a formal complaint, bereavement |
 | `needs_human_action` | the facts show a block or failure only ops can fix (fraud block, account not active, payee account closed, account closed by the originator), or the customer asks for a refund decision |
 | `low_confidence` | triage is below the threshold, or the facts do not show the problem the customer describes |
-| `repeated_failure` | the customer said "that didn't help" twice (👎 or in words), or the output guard rejected two answers (checked in the graph) |
+| `repeated_failure` | two answers did not help (👎, or "that didn't help" in the message after an answer; both about one answer count once), or the output guard rejected two answers (checked in the graph) |
 """
 
 import re
@@ -133,7 +133,9 @@ NOT_HELPFUL_RE = _rx(
 
 
 def said_not_helpful(message: str) -> bool:
-    """The customer says the previous answer did not help ("that didn't help")."""
+    """The message says the previous answer did not help ("that didn't help"). Only
+    meaningful after an answer: the graph does not count it in the first message, where
+    "still declined" describes the problem."""
     return bool(NOT_HELPFUL_RE.search(message))
 
 

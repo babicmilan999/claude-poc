@@ -87,8 +87,9 @@ class AssistantState(TypedDict, total=False):
     customer_id: str
     messages: Annotated[list[AnyMessage], add_messages]  # customer messages and sent replies
     evidence: Annotated[list[dict[str, Any]], operator.add]  # every tool result (contract `Evidence`)
-    not_helpful_said: int  # times the customer said in words that it did not help
-    down_ratings: int  # 👎 so far; set by the caller on every run
+    last_answer_id: int | None  # the latest answer sent (message id); "that didn't help" refers to it
+    not_helpful_answers: list[int]  # answers the customer said in words did not help
+    down_rated: list[int]  # assistant messages rated 👎 so far; set by the caller on every run
     # --- this message only (reset by load_context) ---
     small_talk: str | None
     snapshot: dict[str, Any] | None
@@ -135,6 +136,22 @@ def _last_customer_message(state: AssistantState) -> str:
 
 def _customer_messages(state: AssistantState) -> list[str]:
     return [_text(m) for m in state.get("messages", []) if isinstance(m, HumanMessage)]
+
+
+def _not_helpful_answers(state: AssistantState, message: str) -> list[int]:
+    """The answers the customer has said did not help, with this message. Words only count
+    once there is an answer to refer to ("still declined" in the first message describes
+    the problem), and once per answer."""
+    said = list(state.get("not_helpful_answers", []))
+    last = state.get("last_answer_id")
+    if last is not None and last not in said and said_not_helpful(message):
+        said.append(last)
+    return said
+
+
+def _not_helpful_count(state: AssistantState) -> int:
+    """Answers that did not help, by 👎 or in words; both about the same answer count once."""
+    return len(set(state.get("not_helpful_answers", [])) | set(state.get("down_rated", [])))
 
 
 def _snapshot(state: AssistantState) -> SignalSnapshot | None:
@@ -250,8 +267,11 @@ def build_assistant_graph(
         if _THANKS_RE.match(message):
             return {**reset, "small_talk": prompts.THANKS_REPLY}
         snapshot = await build_signal_snapshot(deps.banking, state["customer_id"], clock=deps.clock)
-        not_helpful = state.get("not_helpful_said", 0) + (1 if said_not_helpful(message) else 0)
-        return {**reset, "snapshot": snapshot.model_dump(mode="json"), "not_helpful_said": not_helpful}
+        return {
+            **reset,
+            "snapshot": snapshot.model_dump(mode="json"),
+            "not_helpful_answers": _not_helpful_answers(state, message),
+        }
 
     async def small_talk(state: AssistantState) -> dict[str, Any]:
         reply = state.get("small_talk") or prompts.GREETING_REPLY
@@ -283,7 +303,7 @@ def build_assistant_graph(
             _last_customer_message(state),
             result,
             _snapshot(state),
-            not_helpful_count=state.get("not_helpful_said", 0) + state.get("down_ratings", 0),
+            not_helpful_count=_not_helpful_count(state),
         )
         return {"handoff": decision.model_dump(mode="json") if decision.handoff else None}
 
@@ -367,7 +387,12 @@ def build_assistant_graph(
             write(ev.token(record.id, piece))
         write(ev.sources(record.id, shown))
         write(ev.message_completed(record))
-        return {"messages": [AIMessage(content=answer)], "result": "answered", "reply_message_id": record.id}
+        return {
+            "messages": [AIMessage(content=answer)],
+            "result": "answered",
+            "reply_message_id": record.id,
+            "last_answer_id": record.id,
+        }
 
     async def handoff(state: AssistantState, config: RunnableConfig) -> dict[str, Any]:
         decision = HandoffDecision.model_validate(state.get("handoff") or {})

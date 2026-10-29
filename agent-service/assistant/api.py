@@ -33,16 +33,60 @@ from assistant.service import (
     MessageNotFound,
     MessageNotRateable,
 )
-from assistant.store import ConversationRecord, ConversationStore, InMemoryConversationStore, SqlConversationStore
+from assistant.store import (
+    ConversationRecord,
+    ConversationStore,
+    HandoffCaseCopy,
+    HandoffCaseRef,
+    HandoffSink,
+    InMemoryConversationStore,
+    SqlConversationStore,
+)
 from core.context import AppContext, Context, KnownCustomerId
-from core.enums import ConversationOutcome, ConversationStatus
+from core.enums import CaseSource, ConversationOutcome, ConversationStatus
 
 log = logging.getLogger(__name__)
 
 SERVICE_KEY = "assistant"
 STORE_KEY = "assistant_store"  # tests may put a store here before startup
+INVESTIGATION_KEY = "investigation"  # the investigation package's service, when it is loaded
 
 router = APIRouter()
+
+
+def investigation_handoff_sink(ctx: AppContext) -> HandoffSink:
+    """Without a database: hand the case to the investigation package's in-memory store
+    (its `add_case`), so its workers investigate it and `/cases/events` announces it. The
+    service is looked up at handoff time (the lifespans start in any order)."""
+
+    async def sink(case: HandoffCaseCopy) -> HandoffCaseRef | None:
+        service = ctx.extras.get(INVESTIGATION_KEY)
+        store = getattr(service, "store", None)
+        add_case = getattr(store, "add_case", None)
+        if service is None or store is None or not callable(add_case):
+            log.warning("no in-memory investigation store: handoff case is not investigated")
+            return None
+        case_id = add_case(
+            customer_id=case.customer_id,
+            source=CaseSource.ASSISTANT_HANDOFF,
+            conversation_id=case.conversation_id,
+            complaint=case.complaint,
+            category=case.category,
+            summary=case.summary,
+            handoff_evidence=list(case.evidence),
+            transcript=list(case.transcript),
+            customer_name=case.customer_name,
+            simulated=case.simulated,
+            # Answer key: stored on the case for scoring only, never read by the investigation.
+            expected_root_cause=case.expected_root_cause.value if case.expected_root_cause else None,
+            expected_outcome=case.expected_outcome.value if case.expected_outcome else None,
+        )
+        created = await store.get_case(case_id)
+        if created is not None:
+            service.publish_case_created(created)
+        return HandoffCaseRef(case_id, getattr(created, "active_investigation_id", None))
+
+    return sink
 
 
 @contextlib.asynccontextmanager
@@ -55,6 +99,8 @@ async def lifespan(app: FastAPI, ctx: AppContext) -> AsyncIterator[None]:
     else:
         log.warning("no database: conversations are kept in memory")
         store = InMemoryConversationStore()
+    if ctx.sessionmaker is None and isinstance(store, InMemoryConversationStore) and store.handoff_sink is None:
+        store.handoff_sink = investigation_handoff_sink(ctx)
     async with open_checkpointer(ctx) as checkpointer:
         deps = AssistantDeps(
             llm=ctx.llm,
