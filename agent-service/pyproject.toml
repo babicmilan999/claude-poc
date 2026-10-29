@@ -60,6 +60,10 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 # Line length is left to the formatter; long prompt and description strings are fine.
 ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
+[tool.ruff.lint.isort]
+# The app's packages, so imports sort the same whichever of them a branch has.
+known-first-party = ["core", "assistant", "investigation", "simulation", "evals", "tests"]
+
 [tool.mypy]
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
