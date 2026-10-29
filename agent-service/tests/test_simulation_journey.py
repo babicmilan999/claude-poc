@@ -101,6 +101,22 @@ async def test_abandoned_when_turns_run_out(h: Harness) -> None:
     result = await run_simulated_conversation(h.service, conversation, customer(h, ALICE, max_turns=5), max_turns=1)
 
     assert result.outcome is ConversationOutcome.ABANDONED and result.ended_by == "max_turns" and result.turns == 1
+    # The simulator wrote the one turn it could send and was not asked for a second.
+    assert len(h.llm.fake("simulator").calls) == 1
+
+
+async def test_persona_max_turns_also_stops_before_another_simulator_call(h: Harness) -> None:
+    conversation = await h.service.create_conversation(ALICE, simulated=True)
+    h.script("simulator", says("Why was my card declined at Tesco?"), says("Are you sure?"), says("Really?"))
+    script_card_answer(h)
+    h.script("triage", input_ok(), classified(IssueType.CARD_DECLINE))
+    h.script("assistant", tool_call("get_my_cards"), text(CARD_ANSWER))
+    h.script("judge", judge(True))
+
+    result = await run_simulated_conversation(h.service, conversation, customer(h, ALICE, max_turns=2), max_turns=6)
+
+    assert result.ended_by == "max_turns" and result.turns == 2
+    assert len(h.llm.fake("simulator").calls) == 2
 
 
 async def test_abandoned_when_the_customer_gives_up(h: Harness) -> None:

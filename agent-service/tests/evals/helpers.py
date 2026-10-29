@@ -49,6 +49,9 @@ class FakeLangfuse:
     items: dict[str, dict[str, Any]] = field(default_factory=dict)
     experiments: list[dict[str, Any]] = field(default_factory=list)
     scores: list[dict[str, Any]] = field(default_factory=list)
+    # What the SDK's `run_experiment` would send per item: the trace's input and metadata,
+    # and each observation's input (the item task's, then each evaluator's).
+    traces: list[dict[str, Any]] = field(default_factory=list)
     flushed: int = 0
 
     def create_dataset(self, *, name: str, **kwargs: Any) -> Any:
@@ -74,8 +77,45 @@ class FakeLangfuse:
         return SimpleNamespace(name=name, items=items)
 
     def run_experiment(self, **kwargs: Any) -> Any:
+        """Records what the SDK traces (see `Langfuse._process_experiment_item`): the item's
+        input as trace and task-observation input, the item's metadata merged with the run's
+        as trace metadata, and the evaluator observations' input. Like the SDK (and the
+        local backend), evaluator errors are logged and their scores dropped."""
         self.experiments.append(kwargs)
-        result = LocalExperiments().run_experiment(**kwargs)
+        run_metadata = dict(kwargs.get("metadata") or {})
+        task = kwargs["task"]
+
+        async def traced_task(*, item: Any, **rest: Any) -> Any:
+            item_input = getattr(item, "input", None)
+            meta = getattr(item, "metadata", None)
+            trace = {
+                "input": item_input,
+                "metadata": {
+                    "dataset_item_id": getattr(item, "id", None),
+                    **(meta if isinstance(meta, dict) else {}),
+                    **run_metadata,
+                },
+                "observations": [{"name": "experiment-item-task", "input": item_input}],
+            }
+            self.traces.append(trace)
+            output = await task(item=item, **rest)
+            trace["output"] = output
+            return output
+
+        def traced(evaluator: Any) -> Any:
+            async def run(**inputs: Any) -> Any:
+                trace = next(t for t in reversed(self.traces) if t["input"] == inputs.get("input"))
+                trace["observations"].append(
+                    {"name": getattr(evaluator, "__name__", "evaluator"), "as_type": "evaluator", "input": inputs}
+                )
+                result = evaluator(**inputs)
+                return await result if hasattr(result, "__await__") else result
+
+            return run
+
+        result = LocalExperiments().run_experiment(
+            **{**kwargs, "task": traced_task, "evaluators": [traced(e) for e in kwargs.get("evaluators", [])]}
+        )
         for item_result in result.item_results:
             item_result.trace_id = uuid.uuid4().hex
         return result

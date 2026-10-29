@@ -4,17 +4,22 @@ the same call shape when it is off (no keys, no network).
 `LocalExperiments.run_experiment` mirrors `Langfuse.run_experiment`: it calls
 `task(item=...)` for each item and every evaluator with `input`, `output`,
 `expected_output` and `metadata`, and returns results with `.item_results`, each with
-`.item`, `.output` and `.evaluations`.
+`.item`, `.output` and `.evaluations`. Like the SDK, it logs and skips what fails: an
+evaluator that raises adds no evaluations, an item whose task raises has no result. The
+gate (`evals.report.check_gate`) fails on both.
 """
 
 import asyncio
 import concurrent.futures
 import inspect
+import logging
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from langfuse.experiment import Evaluation
+
+log = logging.getLogger(__name__)
 
 
 class ExperimentBackend(Protocol):
@@ -118,21 +123,30 @@ class LocalExperiments:
     ) -> LocalExperimentResult:
         semaphore = asyncio.Semaphore(max_concurrency)
 
-        async def one(item: Any) -> LocalItemResult:
+        async def one(item: Any) -> LocalItemResult | None:
             async with semaphore:
-                output = await _maybe_await(task(item=item))
+                try:
+                    output = await _maybe_await(task(item=item))
+                except Exception:
+                    log.exception("experiment task failed; the item has no result")
+                    return None
                 evaluations: list[Evaluation] = []
                 for evaluator in evaluators:
-                    result = await _maybe_await(
-                        evaluator(
-                            input=item_field(item, "input"),
-                            output=output,
-                            expected_output=item_field(item, "expected_output"),
-                            metadata=item_field(item, "metadata"),
+                    try:
+                        result = await _maybe_await(
+                            evaluator(
+                                input=item_field(item, "input"),
+                                output=output,
+                                expected_output=item_field(item, "expected_output"),
+                                metadata=item_field(item, "metadata"),
+                            )
                         )
-                    )
-                    evaluations += normalise_evaluations(result)
+                        evaluations += normalise_evaluations(result)
+                    except Exception:
+                        log.exception("evaluator failed; its scores are missing")
                 return LocalItemResult(item=item, output=output, evaluations=evaluations)
 
         results = await asyncio.gather(*(one(item) for item in data))
-        return LocalExperimentResult(name=name, run_name=run_name, item_results=list(results), metadata=metadata)
+        return LocalExperimentResult(
+            name=name, run_name=run_name, item_results=[r for r in results if r is not None], metadata=metadata
+        )

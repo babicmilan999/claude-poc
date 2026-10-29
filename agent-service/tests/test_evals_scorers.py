@@ -44,7 +44,7 @@ def case(
 
 
 def output(mode: Mode = Mode.JOURNEY, **kwargs: object) -> ItemOutput:
-    return ItemOutput(scenario_id="s", mode=mode, **kwargs)  # type: ignore[arg-type]
+    return ItemOutput(mode=mode, **kwargs)  # type: ignore[arg-type]
 
 
 # --- handoff_correct -----------------------------------------------------------------------
@@ -229,16 +229,61 @@ def test_report_summary_by_score_and_mode() -> None:
 
 def test_gate_passes_fails_and_reports_unmeasured_scores() -> None:
     thresholds = {"handoff_correct": 0.8, "diagnosis_correct": 0.7}
-    passing = check_gate(_report((Mode.JOURNEY, {"handoff_correct": 1.0})), thresholds)
+    passing = check_gate(_report((Mode.JOURNEY, {"item_ok": 1.0, "handoff_correct": 1.0})), thresholds)
     assert passing.passed and passing.unchecked == ["diagnosis_correct"]
 
     failing = check_gate(
-        _report((Mode.JOURNEY, {"handoff_correct": 1.0}), (Mode.JOURNEY, {"handoff_correct": 0.0})), thresholds
+        _report(
+            (Mode.JOURNEY, {"item_ok": 1.0, "handoff_correct": 1.0}),
+            (Mode.JOURNEY, {"item_ok": 1.0, "handoff_correct": 0.0}),
+        ),
+        thresholds,
     )
     assert not failing.passed and failing.failures[0].startswith("handoff_correct: 0.500 < 0.800")
     assert "FAILED" in failing.format()
 
     assert not check_gate(EvalReport(run_name="empty"), thresholds).passed
+
+
+def test_gate_fails_when_an_item_was_not_scored() -> None:
+    """An item with no scores (its evaluator raised) used to pass every threshold."""
+    gate = check_gate(_report((Mode.JOURNEY, {})), load_thresholds())
+    assert not gate.passed
+    assert any("no item_ok score" in f and "s0/journey" in f for f in gate.failures)
+
+    one_missing = check_gate(
+        _report((Mode.JOURNEY, {"item_ok": 1.0, "handoff_correct": 1.0}), (Mode.ASSISTANT, {})),
+        {"handoff_correct": 0.8},
+    )
+    assert not one_missing.passed and any("1 item(s) have no item_ok" in f for f in one_missing.failures)
+
+
+def test_gate_fails_when_no_threshold_was_measured() -> None:
+    gate = check_gate(_report((Mode.COPILOT, {"item_ok": 1.0})), {"handoff_correct": 0.8, "diagnosis_correct": 0.7})
+    assert not gate.passed and gate.failures == ["no threshold was measured in this run"]
+    assert gate.unchecked == ["diagnosis_correct", "handoff_correct"]
+    assert not check_gate(_report((Mode.COPILOT, {"item_ok": 1.0})), {}).passed
+
+
+def test_gate_fails_on_thresholds_that_match_no_scorer() -> None:
+    report = _report((Mode.JOURNEY, {"item_ok": 1.0, "handoff_correct": 1.0}))
+    typo = check_gate(report, {"handoff_correct": 0.8, "handof_correct": 0.8})
+    assert not typo.passed and typo.failures == ["threshold 'handof_correct' matches no scorer"]
+    tracked = check_gate(report, {"handoff_correct": 0.8, "seconds": 10.0})
+    assert not tracked.passed and tracked.failures == ["threshold 'seconds' is tracked, not gated"]
+
+
+def test_score_names_match_their_scorers() -> None:
+    assert {
+        "item_ok",
+        "handoff_correct",
+        "containment",
+        "assistant_category_correct",
+        "copilot_category_correct",
+        "diagnosis_correct",
+        "groundedness",
+    } == scorers.GATED_SCORES
+    assert set(load_thresholds()) <= scorers.GATED_SCORES
 
 
 def test_thresholds_file_gates_only_real_scores(tmp_path: Path) -> None:

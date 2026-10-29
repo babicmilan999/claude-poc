@@ -63,7 +63,9 @@ class CaseOut(BaseModel):
 
 
 class ItemOutput(BaseModel):
-    scenario_id: str
+    """The task's output (and the experiment trace's output): no scenario id, since ids
+    like `card-decline-fraud-rule` name the answer."""
+
     mode: Mode
     conversation: ConversationOut | None = None
     answers: list[AnswerOut] = Field(default_factory=list)

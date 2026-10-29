@@ -207,6 +207,11 @@ async def groundedness(llm: LLMProvider, output: ItemOutput) -> Score | None:
 AsyncScorer = Callable[[LLMProvider, ItemOutput], Awaitable[Score | None]]
 JUDGE_SCORERS: tuple[AsyncScorer, ...] = (groundedness,)
 
+# Every score name a scorer can produce (each scorer is named after its score), and the
+# ones the gate may set a threshold on.
+SCORE_NAMES = frozenset(f.__name__ for f in (*DETERMINISTIC_SCORERS, *JUDGE_SCORERS))
+GATED_SCORES = SCORE_NAMES - TRACKED_ONLY
+
 
 async def score_item(output: ItemOutput, expected: Expected, llm: LLMProvider | None) -> list[Score]:
     """Every scorer that applies; the judge only when an LLM provider is given."""

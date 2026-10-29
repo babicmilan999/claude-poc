@@ -7,7 +7,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from evals.results import Mode
-from evals.scorers import TRACKED_ONLY
+from evals.scorers import GATED_SCORES, TRACKED_ONLY
 
 THRESHOLDS_FILE = Path(__file__).resolve().parent / "thresholds.yaml"
 
@@ -95,17 +95,40 @@ def load_thresholds(path: Path = THRESHOLDS_FILE) -> dict[str, float]:
 
 def check_gate(report: EvalReport, thresholds: dict[str, float]) -> GateResult:
     """Every threshold's average must be met. A score no item produced is reported as not
-    measured (for example `diagnosis_correct` in an assistant-only run), not as a failure;
-    a run with no items at all fails."""
+    measured (for example `diagnosis_correct` in an assistant-only run), not as a failure,
+    but the gate fails when nothing could have been measured:
+
+    - the run has no items;
+    - an item has no `item_ok` score (its evaluator did not run or raised; Langfuse's
+      `run_experiment` logs evaluator errors and drops the scores);
+    - a threshold names no gated scorer (a typo in `thresholds.yaml`, or a tracked number);
+    - no threshold was measured at all.
+    """
     if not report.items:
         return GateResult(passed=False, failures=["no eval items ran"])
-    summary = report.summary()
     failures: list[str] = []
+    unscored = [f"{i.scenario_id}/{i.mode.value}" for i in report.items if "item_ok" not in i.scores]
+    if unscored:
+        failures.append(
+            f"{len(unscored)} item(s) have no item_ok score (the evaluator did not run or failed): "
+            + ", ".join(unscored)
+        )
+    for name in sorted(set(thresholds) - GATED_SCORES):
+        what = "is tracked, not gated" if name in TRACKED_ONLY else "matches no scorer"
+        failures.append(f"threshold {name!r} {what}")
+    summary = report.summary()
     unchecked: list[str] = []
+    measured = 0
     for name, minimum in sorted(thresholds.items()):
+        if name not in GATED_SCORES:
+            continue
         score = summary.get(name)
         if score is None:
             unchecked.append(name)
-        elif score.mean < minimum:
+            continue
+        measured += 1
+        if score.mean < minimum:
             failures.append(f"{name}: {score.mean:.3f} < {minimum:.3f} ({score.count} item(s))")
+    if measured == 0:
+        failures.append("no threshold was measured in this run")
     return GateResult(passed=not failures, failures=failures, unchecked=unchecked)

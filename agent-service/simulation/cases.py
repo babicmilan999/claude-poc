@@ -6,9 +6,11 @@ handoff case: in Postgres, the case row and its queued investigation in one tran
 then `NOTIFY case_events` (the investigation package's listener announces it on the case
 queue); without a database, through the in-memory store.
 
-`copy_handoff_case` is for in-process eval runs on in-memory stores only: there the
-assistant's handoff case lives in the assistant's store, so it is copied to the
-investigation store (in Postgres both packages share the `cases` table).
+`investigation_handoff_sink` is the assistant store's `handoff_sink` for in-process eval
+runs on in-memory stores (in Postgres both packages share the `cases` table): at handoff
+the assistant's in-memory store hands the case, with its transcript and hidden answer
+key, to the investigation's in-memory store, like `assistant.api` does in the app
+without a database (that one finds the investigation service through the `AppContext`).
 """
 
 import json
@@ -16,7 +18,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from assistant.store import InMemoryConversationStore
+from assistant.store import HandoffCaseCopy, HandoffCaseRef, HandoffSink
 from core.db.models import Case as CaseRow
 from core.enums import CaseSource, CaseStatus
 from core.jobs import CASE_EVENTS_CHANNEL, JobQueue, notify
@@ -86,30 +88,31 @@ async def create_simulated_email_case(
     return case
 
 
-async def copy_handoff_case(
-    conversations: InMemoryConversationStore,
-    investigations: MemoryInvestigationStore,
-    conversation_id: uuid.UUID,
-) -> uuid.UUID | None:
-    """Copy the assistant's handoff case (with its transcript and hidden answer key) to the
-    in-memory investigation store and queue its investigation. Returns the new case id."""
-    rows = [c for c in conversations.cases if c["conversation_id"] == conversation_id]
-    if not rows:
-        return None
-    row = rows[-1]
-    messages = await conversations.list_messages(conversation_id)
-    root_cause = row.get("expected_root_cause")
-    outcome = row.get("expected_outcome")
-    return investigations.add_case(
-        customer_id=row["customer_id"],
-        source=CaseSource.ASSISTANT_HANDOFF,
-        complaint=row.get("complaint"),
-        category=row.get("category"),
-        summary=row.get("summary"),
-        handoff_evidence=list(row.get("handoff_evidence") or []),
-        transcript=[(m.role.value, m.content) for m in messages],
-        customer_name=row.get("customer_name"),
-        simulated=bool(row.get("simulated")),
-        expected_root_cause=getattr(root_cause, "value", root_cause),
-        expected_outcome=getattr(outcome, "value", outcome),
-    )
+def investigation_handoff_sink(investigation: InvestigationService) -> HandoffSink:
+    """Takes each handoff case into the investigation's in-memory store and announces it."""
+    store = investigation.store
+    if not isinstance(store, MemoryInvestigationStore):
+        raise CaseStoreUnavailable("handoff sinks are for the in-memory investigation store")
+
+    async def sink(case: HandoffCaseCopy) -> HandoffCaseRef | None:
+        case_id = store.add_case(
+            customer_id=case.customer_id,
+            source=CaseSource.ASSISTANT_HANDOFF,
+            conversation_id=case.conversation_id,
+            complaint=case.complaint,
+            category=case.category,
+            summary=case.summary,
+            handoff_evidence=list(case.evidence),
+            transcript=list(case.transcript),
+            customer_name=case.customer_name,
+            simulated=case.simulated,
+            # Answer key: stored on the case for scoring only, never read by the investigation.
+            expected_root_cause=case.expected_root_cause.value if case.expected_root_cause else None,
+            expected_outcome=case.expected_outcome.value if case.expected_outcome else None,
+        )
+        created = await store.get_case(case_id)
+        if created is not None:
+            investigation.publish_case_created(created)
+        return HandoffCaseRef(case_id, getattr(created, "active_investigation_id", None))
+
+    return sink

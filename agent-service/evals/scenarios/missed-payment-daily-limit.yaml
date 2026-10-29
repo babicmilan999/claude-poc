@@ -8,8 +8,8 @@ incident:
   params:
     payee_name: Oakwood Lettings
 complaint: >-
-  My rent standing order to Oakwood Lettings did not go out today. I moved
-  some money to savings this morning. Why did the rent fail?
+  My rent standing order to Oakwood Lettings did not go out today. It
+  normally works and I had the money. Why did the rent fail?
 persona:
   vagueness: medium
   patience: medium
@@ -25,7 +25,7 @@ persona:
   max_turns: 6
 conversation_script:
   - My rent standing order failed today. Why?
-  - I did move money to savings this morning. Is that the problem?
+  - The money was there this morning. How do I get the rent paid today?
 expected:
   issue_type: missed_payment
   root_cause: daily_payment_limit_exceeded

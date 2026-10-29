@@ -145,13 +145,13 @@ async def run_simulated_conversation(
     driver = ConversationDriver(assistant, conversation, capture_answers=capture_answers)
     limit = max(1, min(max_turns, customer.view.persona.max_turns))
     while True:
+        if driver.result.turns >= limit:  # before asking the simulator for a turn it can't send
+            return await driver.finish("max_turns", ConversationOutcome.ABANDONED)
         turn = await customer.next_turn(driver.result.lines)
         if turn.done:
             if turn.satisfied and driver.result.turns > 0:
                 return await driver.finish("customer_satisfied", ConversationOutcome.RESOLVED)
             return await driver.finish("customer_gave_up", ConversationOutcome.ABANDONED)
-        if driver.result.turns >= limit:
-            return await driver.finish("max_turns", ConversationOutcome.ABANDONED)
         reply = await driver.send(turn.message)
         if reply.handed_off:
             return await driver.finish("handoff")

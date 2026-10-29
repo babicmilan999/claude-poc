@@ -6,7 +6,8 @@ LangGraph's in-memory checkpointer, a banking client and the banking simulation 
 Shared across items: the LLM provider (real aliases through LiteLLM, or the fake LLM in
 tests), the knowledge base and tracing.
 
-The task gets only the public scenario (no `expected` block). It creates the incident
+The task gets only the public scenario (no `expected` block), looked up by the runner
+from the item's opaque id: the scenario never travels as a dataset item or trace input. It creates the incident
 through the banking simulation, which returns its own answer key; that key is only
 handed to the stores' `simulated` / `expected_*` parameters, exactly like the Simulate
 buttons do, and never to an agent.
@@ -40,7 +41,7 @@ from investigation.service import InvestigationService
 from investigation.settings import InvestigationSettings
 from investigation.store_memory import MemoryInvestigationStore
 from simulation.banking import IncidentRequest, SimulationBankingClient
-from simulation.cases import copy_handoff_case, create_simulated_email_case
+from simulation.cases import create_simulated_email_case, investigation_handoff_sink
 from simulation.journey import JourneyResult, run_scripted_conversation, run_simulated_conversation
 from simulation.outcomes import read_case_outcome
 from simulation.persona import CustomerView, PersonaSpec, SimulatedCustomer
@@ -88,11 +89,12 @@ class EvalRuntime:
     @classmethod
     def from_settings(cls, settings: Settings) -> "EvalRuntime":
         from core.llm import LiteLLMProvider
+        from evals.redaction import init_eval_langfuse
 
         return cls(
             settings=settings,
             llm=LiteLLMProvider(settings),
-            tracing=Tracing.from_settings(settings),
+            tracing=Tracing(client=init_eval_langfuse(settings), profile=settings.llm_profile),
             kb_factory=default_kb_factory(settings),
         )
 
@@ -162,6 +164,8 @@ class ItemWorld:
             settings=runtime.investigation_settings,
             tracing=runtime.tracing,
         )
+        # Handoff cases go straight to the investigation's store, as in the app without a database.
+        self.conversations.handoff_sink = investigation_handoff_sink(self.investigation)
         return self
 
     async def __aexit__(
@@ -210,7 +214,7 @@ async def _investigate(world: ItemWorld, case_id: uuid.UUID, output: ItemOutput,
 async def run_item(runtime: EvalRuntime, scenario: PublicScenario, mode: Mode) -> ItemOutput:
     """Run one scenario in one mode. Never raises: an error ends up in `output.error`."""
     started = time.perf_counter()
-    output = ItemOutput(scenario_id=scenario.id, mode=mode)
+    output = ItemOutput(mode=mode)
     try:
         async with ItemWorld(runtime, with_kb=mode is not Mode.COPILOT) as world:
             assert world.assistant is not None and world.investigation is not None
@@ -249,10 +253,8 @@ async def run_item(runtime: EvalRuntime, scenario: PublicScenario, mode: Mode) -
                 category = record.category if record else None
                 output.conversation = _conversation_out(result, category)
                 output.answers = [AnswerOut(text=a.text, sources=a.sources) for a in result.answers]
-                if mode is Mode.JOURNEY and result.handed_off:
-                    case_id = await copy_handoff_case(world.conversations, world.cases, conversation.id)
-                    if case_id is not None:
-                        await _investigate(world, case_id, output, category)
+                if mode is Mode.JOURNEY and result.handed_off and result.case_id is not None:
+                    await _investigate(world, result.case_id, output, category)
     except Exception as exc:
         output.error = f"{exc.__class__.__name__}: {exc}"
     output.seconds = time.perf_counter() - started

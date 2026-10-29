@@ -67,11 +67,41 @@ def test_contract_examples_are_part_of_the_eval_set() -> None:
         assert yaml.safe_load(ours.read_text()) == yaml.safe_load(example.read_text())
 
 
+# Words that would hand the agents the root cause if the customer said them before the
+# assistant explained anything (complaint, phrasing, first scripted message).
+GIVEAWAYS: dict[RootCause, tuple[str, ...]] = {
+    RootCause.CARD_FROZEN_BY_CUSTOMER: ("froze", "frozen", "freez"),
+    RootCause.INSUFFICIENT_FUNDS: ("insufficient", "not enough money", "low balance", "overdrawn", "no money"),
+    RootCause.CARD_EXPIRED: ("expired", "expiry", "out of date", "new card"),
+    RootCause.CONTACTLESS_LIMIT_EXCEEDED: ("limit",),
+    RootCause.MERCHANT_CATEGORY_BLOCKED: ("blocked", "gambling", "category", "spending control"),
+    RootCause.FRAUD_RULE_TRIGGERED: ("fraud", "suspicious", "security check"),
+    RootCause.DAILY_PAYMENT_LIMIT_EXCEEDED: ("limit", "too many payments", "savings"),
+    RootCause.PAYEE_ACCOUNT_CLOSED: ("closed", "shut"),
+    RootCause.MANDATE_CANCELLED_BY_CUSTOMER: ("cancelled", "mandate"),
+    RootCause.ACCOUNT_CLOSED_BY_ORIGINATOR: ("closed", "originator"),
+}
+# The customer guessing at a cause, in any scripted message.
+SPECULATION = ("is that the problem", "is that why", "is it because", "was it because", "is that the reason")
+
+
+def test_giveaways_cover_every_root_cause() -> None:
+    assert set(GIVEAWAYS) == {s.expected.root_cause for s in load_scenarios()}
+
+
 def test_customer_knowledge_never_states_the_root_cause() -> None:
     for scenario in load_scenarios():
-        words = " ".join([*scenario.persona.knows, *scenario.persona.phrasing, *(scenario.conversation_script or [])])
+        script = scenario.conversation_script or []
+        words = " ".join([*scenario.persona.knows, *scenario.persona.phrasing, *script])
         words += " " + (scenario.complaint or "")
         assert scenario.expected.root_cause.value not in words.lower().replace(" ", "_"), scenario.id
+
+        opening = " ".join([*scenario.persona.phrasing, *script[:1], scenario.complaint or ""]).lower()
+        for phrase in GIVEAWAYS[scenario.expected.root_cause]:
+            assert phrase not in opening, f"{scenario.id}: the customer opens with {phrase!r}"
+        for line in script:
+            for phrase in SPECULATION:
+                assert phrase not in line.lower(), f"{scenario.id}: the script guesses the cause: {line!r}"
 
 
 def test_public_scenario_has_no_answer_key() -> None:
