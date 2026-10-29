@@ -12,14 +12,15 @@ import contextlib
 import importlib
 import importlib.util
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from types import ModuleType
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from core.api import router as core_router
 from core.context import AppContext, build_context
@@ -46,11 +47,13 @@ def load_feature_modules(names: Sequence[str]) -> list[ModuleType]:
     return modules
 
 
-def problem(status: int, title: str, detail: str | None = None) -> JSONResponse:
+def problem(
+    status: int, title: str, detail: str | None = None, headers: Mapping[str, str] | None = None
+) -> JSONResponse:
     body: dict[str, Any] = {"title": title, "status": status}
     if detail:
         body["detail"] = detail
-    return JSONResponse(body, status_code=status, media_type="application/problem+json")
+    return JSONResponse(body, status_code=status, media_type="application/problem+json", headers=headers)
 
 
 async def _ingest_kb(ctx: AppContext) -> None:
@@ -111,10 +114,12 @@ def create_app(
         expose_headers=["Content-Type"],
     )
 
-    @app.exception_handler(HTTPException)
-    async def _http_problem(_: Request, exc: HTTPException) -> JSONResponse:
-        title = exc.detail if isinstance(exc.detail, str) else "Error"
-        return problem(exc.status_code, title)
+    # Starlette's HTTPException covers FastAPI's (a subclass) and the router's own 404 for
+    # unknown routes and 405 for a wrong method (its `Allow` header is kept).
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_problem(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+        title = exc.detail if isinstance(exc.detail, str) and exc.detail else "Error"
+        return problem(exc.status_code, title, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_problem(_: Request, exc: RequestValidationError) -> JSONResponse:

@@ -39,6 +39,23 @@ def test_customers_banking_down(app_client: TestClient, banking_mock: ContractBa
     assert response.json()["status"] == 502
 
 
+def test_unknown_routes_and_methods_are_problems(app_client: TestClient) -> None:
+    """The router's own 404 and 405 answer with problem+json like every other error."""
+    problem = schema_validator(AGENT_URI, "Problem")
+    missing = app_client.get("/no-such-route")
+    assert missing.status_code == 404
+    assert missing.headers["content-type"].startswith("application/problem+json")
+    problem.validate(missing.json())
+    assert missing.json() == {"title": "Not Found", "status": 404}
+
+    wrong_method = app_client.delete("/health")
+    assert wrong_method.status_code == 405
+    assert wrong_method.headers["content-type"].startswith("application/problem+json")
+    assert wrong_method.headers["allow"] == "GET"
+    problem.validate(wrong_method.json())
+    assert wrong_method.json()["status"] == 405
+
+
 def test_me_overview(app_client: TestClient) -> None:
     response = app_client.get("/me/overview", headers={"X-Customer-Id": ALICE})
     assert response.status_code == 200
