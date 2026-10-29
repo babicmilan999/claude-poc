@@ -162,9 +162,15 @@ services:
       context: ../frontend
       args:
         APP: ops-console
+        # real (the agent API) or mock (the in-browser mock)
+        API_MODE: ${FRONTEND_API_MODE:-real}
     restart: unless-stopped
     depends_on:
       - agent-service
+    environment:
+      # As the browser sees them; written to config.json at container start.
+      API_BASE_URL: ${AGENT_API_PUBLIC_URL:-http://localhost:8000}
+      CUSTOMER_APP_URL: ${CUSTOMER_APP_PUBLIC_URL:-http://localhost:4300}
     ports:
       - "4200:80"
 
@@ -173,9 +179,12 @@ services:
       context: ../frontend
       args:
         APP: customer-app
+        API_MODE: ${FRONTEND_API_MODE:-real}
     restart: unless-stopped
     depends_on:
       - agent-service
+    environment:
+      API_BASE_URL: ${AGENT_API_PUBLIC_URL:-http://localhost:8000}
     ports:
       - "4300:80"
 
