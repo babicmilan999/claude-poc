@@ -337,7 +337,7 @@ def test_reject_with_hint_requeues_the_same_investigation(client: TestClient, fa
     _script_card_decline(fake_llm)
     _run_jobs(client)
     after = _valid("Investigation", client.get(f"/investigations/{inv_id}").json())
-    assert after["status"] == "awaiting_review" and after["review"] is None and after["attempts"] == 2
+    assert after["status"] == "awaiting_review" and after["review"] is None and after["attempts"] == 1
     assert len(client.get(f"/cases/{case_id}").json()["investigations"]) == 1
 
 
@@ -421,3 +421,65 @@ async def test_case_queue_stream_carries_case_created_and_status_changed(banking
     ]
     await stream.aclose()  # type: ignore[attr-defined]
     assert h.service.broker.case_subscribers == 0
+
+
+# --- one checkpointer for both graphs ------------------------------------------------------
+
+
+def _investigation_app(settings: Settings, app_context_factory: Any, modules: tuple[str, ...], **extras: Any) -> Any:
+    def factory(s: Settings) -> AppContext:
+        ctx: AppContext = app_context_factory(s)
+        ctx.extras.update(extras)
+        return ctx
+
+    return create_app(settings, context_factory=factory, feature_modules=modules)
+
+
+def test_investigations_reuse_the_shared_checkpointer(
+    settings: Settings, app_context_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    monkeypatch.setenv("INVESTIGATION_WORKERS_ENABLED", "false")
+    shared = InMemorySaver()
+    app = _investigation_app(settings, app_context_factory, ("investigation.api",), checkpointer=shared)
+    with TestClient(app) as test_client:
+        assert _service(test_client).graph.checkpointer is shared
+
+
+def test_investigations_publish_a_checkpointer_when_none_is_shared(
+    settings: Settings, app_context_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("INVESTIGATION_WORKERS_ENABLED", "false")
+    app = _investigation_app(settings, app_context_factory, ("investigation.api",))
+    with TestClient(app) as test_client:
+        extras = test_client.app.state.context.extras  # type: ignore[attr-defined]
+        assert extras["checkpointer"] is _service(test_client).graph.checkpointer
+    assert "checkpointer" not in extras, "removed when the lifespan exits"
+
+
+def test_the_assistant_and_investigations_share_one_checkpointer(
+    settings: Settings, app_context_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`core.app` enters the assistant's lifespan first; investigations reuse its saver."""
+    pytest.importorskip("assistant.api")  # only on a branch that has both packages
+    monkeypatch.setenv("INVESTIGATION_WORKERS_ENABLED", "false")
+    app = _investigation_app(settings, app_context_factory, ("assistant.api", "investigation.api"))
+    with TestClient(app) as test_client:
+        extras = test_client.app.state.context.extras  # type: ignore[attr-defined]
+        assert extras["checkpointer"] is not None
+        assert _service(test_client).graph.checkpointer is extras["checkpointer"]
+
+
+def test_the_finalize_step_is_stored_before_the_stream_closes(client: TestClient, fake_llm: FakeLLMProvider) -> None:
+    _, inv_id = _create_and_diagnose(client, fake_llm)
+    response = client.post(f"/investigations/{inv_id}/feedback", json={"verdict": "accepted"})
+    assert response.status_code == 202
+    assert client.portal is not None
+    client.portal.call(_service(client).wait_background)  # the background finalize has run
+    events = client.get(f"/investigations/{inv_id}/events").json()
+    assert events[-1]["type"] == "status_changed" and events[-1]["payload"]["status"] == "completed"
+    assert events[-2]["type"] == "step_started" and events[-2]["payload"]["node"] == "finalize"
+    # The SSE stream (closed at `completed`) therefore carried the whole timeline.
+    stream = client.get(f"/investigations/{inv_id}/events", headers={"Accept": "text/event-stream"})
+    assert [m["event"] for m in _parse_sse(stream.text)] == [e["type"] for e in events]

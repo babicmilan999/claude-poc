@@ -1,6 +1,7 @@
 """Ops console endpoints for cases and investigations (`contracts/agent-api.yaml`, tags
 `ops-cases` and `ops-investigations`), and the lifespan that wires the graph, the
-checkpointer, the store and the worker pool.
+checkpointer (shared with the assistant, `investigation.checkpoint`), the store and the
+worker pool.
 
 `core.app` picks this module up: it includes `router` and enters `lifespan(app, ctx)`.
 Set `INVESTIGATION_WORKERS_ENABLED=false` to run without the worker pool (tests drive
@@ -26,7 +27,7 @@ from core.context import AppContext, Context
 from core.enums import CaseSource, CaseStatus, IssueType
 from core.jobs import CASE_EVENTS_CHANNEL, notify
 from investigation.broker import Broker
-from investigation.checkpoint import memory_checkpointer, postgres_checkpointer, psycopg_url
+from investigation.checkpoint import psycopg_url, shared_checkpointer
 from investigation.graph import GraphDeps, build_graph
 from investigation.schemas import (
     STREAM_STOP_STATUSES,
@@ -294,12 +295,10 @@ async def lifespan(app: FastAPI, ctx: AppContext) -> AsyncIterator[None]:
 
     if "investigation_checkpointer" in ctx.extras:
         checkpointer_cm: Any = contextlib.nullcontext(ctx.extras["investigation_checkpointer"])
-    elif use_postgres:
-        checkpointer_cm = postgres_checkpointer(
-            ctx.settings.database_url, max_size=ctx.settings.max_parallel_investigations + 2
+    else:  # the assistant's saver when it is loaded (schema `langgraph`), else our own
+        checkpointer_cm = shared_checkpointer(
+            ctx, use_postgres=use_postgres, max_size=ctx.settings.max_parallel_investigations + 2
         )
-    else:
-        checkpointer_cm = memory_checkpointer()
 
     async with checkpointer_cm as checkpointer:
         service_ref: dict[str, InvestigationService] = {}

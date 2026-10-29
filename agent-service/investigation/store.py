@@ -154,8 +154,11 @@ class InvestigationStore(Protocol):
 
     # --- events -----------------------------------------------------------------------------
     async def append_event(
-        self, investigation_id: uuid.UUID, type: str, payload: dict[str, Any]
-    ) -> InvestigationEvent: ...
+        self, investigation_id: uuid.UUID, type: str, payload: dict[str, Any], *, job: ClaimedJob | None = None
+    ) -> InvestigationEvent:
+        """With `job`: only while that worker still owns it (`JobLost` otherwise), in the
+        same transaction as the insert. Without: unconditional (API-side writes)."""
+        ...
 
     async def list_events(
         self, investigation_id: uuid.UUID, after_id: int | None = None

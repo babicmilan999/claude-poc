@@ -124,12 +124,22 @@ async def test_full_review_cycle_on_postgres(harness: Harness) -> None:
     again = await h.store.get_investigation(inv_id)
     assert again is not None and again.status == InvestigationStatus.AWAITING_REVIEW and again.review is None
     assert again.diagnosis is not None and investigation.diagnosis.id != again.diagnosis.id
+    assert again.attempts == 1, "the reject reset the retry budget"
 
     accepted = await h.service.submit_feedback(inv_id, FeedbackRequest(verdict=Verdict.ACCEPTED))
     assert accepted.investigation.status == InvestigationStatus.COMPLETED
     await h.service.finalize(inv_id, accepted.resume_payload)
     snapshot = await h.service.graph.aget_state({"configurable": {"thread_id": str(inv_id)}})
     assert snapshot.values["outcome"] == "finalized"
+    tail = (await h.store.list_events(inv_id))[-2:]
+    assert [e.type for e in tail] == ["step_started", "status_changed"] and tail[0].payload["node"] == "finalize"
+    async with h.store._sessionmaker() as session:
+        threads = (
+            await session.execute(
+                text("SELECT count(*) FROM langgraph.checkpoints WHERE thread_id = :t"), {"t": str(inv_id)}
+            )
+        ).scalar_one()
+    assert threads > 0, "checkpoints live in the shared `langgraph` schema"
     detail = await h.store.get_case_detail(case_id)
     assert detail is not None and detail.status == CaseStatus.RESOLVED
     _valid("CaseDetail", detail.model_dump(mode="json"))
@@ -209,6 +219,8 @@ def test_app_lifespan_on_postgres(
     app = create_app(settings, context_factory=factory, feature_modules=("investigation.api",), migrate=lambda s: None)
     _script(fake_llm)
     with TestClient(app) as client:
+        extras = client.app.state.context.extras  # type: ignore[attr-defined]
+        assert extras["checkpointer"] is extras["investigation"].graph.checkpointer, "published for sharing"
         case = client.post(
             "/cases", json={"customer_id": ALICE, "source": "email", "complaint": "card declined"}
         ).json()
@@ -225,3 +237,22 @@ def test_app_lifespan_on_postgres(
         response = client.post(f"/investigations/{inv_id}/feedback", json={"verdict": "accepted"})
         assert response.status_code == 202 and response.json()["status"] == "completed"
         assert client.get(f"/cases/{case['id']}").json()["status"] == "resolved"
+
+
+async def test_append_event_refuses_a_worker_that_lost_its_job(harness: Harness) -> None:
+    from investigation.store import JobLost
+
+    h = harness
+    await _new_case(h)
+    job = await h.store.claim_next("w1")
+    assert job is not None
+    await h.store.append_event(job.investigation_id, "token", {"text": "ok"}, job=job)
+    async with h.store._sessionmaker.begin() as session:
+        await session.execute(
+            text("UPDATE agents.investigations SET worker_id = 'w2' WHERE id = :i"), {"i": job.investigation_id}
+        )
+    with pytest.raises(JobLost):
+        await h.store.append_event(job.investigation_id, "token", {"text": "late"}, job=job)
+    await h.store.append_event(job.investigation_id, "token", {"text": "api"})
+    texts = [e.payload["text"] for e in await h.store.list_events(job.investigation_id) if e.type == "token"]
+    assert texts == ["ok", "api"]

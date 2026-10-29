@@ -340,7 +340,9 @@ class SqlInvestigationStore:
         async with self._sessionmaker.begin() as session:
             inv = (
                 await session.execute(
-                    select(m.Investigation.id, m.Investigation.status, m.Investigation.case_id)
+                    select(
+                        m.Investigation.id, m.Investigation.status, m.Investigation.case_id, m.Investigation.steps_used
+                    )
                     .where(m.Investigation.id == investigation_id)
                     .with_for_update()
                 )
@@ -380,6 +382,11 @@ class SqlInvestigationStore:
             rejected = feedback.verdict is Verdict.REJECTED
             if rejected:
                 await self.jobs.requeue(session, investigation_id, payload)
+                # A review starts a new run: its retry budget is fresh (attempts count
+                # crash retries, and every resume claim adds one).
+                await session.execute(
+                    update(m.Investigation).where(m.Investigation.id == investigation_id).values(attempts=0)
+                )
                 events.append(status_event(InvestigationStatus.QUEUED))
                 transitions = await _set_case_status(session, inv.case_id, CaseStatus.INVESTIGATING)
             else:
@@ -388,6 +395,9 @@ class SqlInvestigationStore:
                     .where(m.Investigation.id == investigation_id)
                     .values(status=InvestigationStatus.COMPLETED.value, finished_at=func.now(), worker_id=None)
                 )
+                # `finalize` runs after this, outside a worker; its timeline step is
+                # written here, before the status that closes the event streams.
+                events.append(("step_started", {"node": "finalize", "step": inv.steps_used or 0}))
                 events.append(status_event(InvestigationStatus.COMPLETED))
                 if feedback.corrected_issue_type is not None:
                     await session.execute(
@@ -404,9 +414,16 @@ class SqlInvestigationStore:
     # --- events -----------------------------------------------------------------------------
 
     async def append_event(
-        self, investigation_id: uuid.UUID, type: str, payload: dict[str, Any]
+        self, investigation_id: uuid.UUID, type: str, payload: dict[str, Any], *, job: ClaimedJob | None = None
     ) -> schemas.InvestigationEvent:
         async with self._sessionmaker.begin() as session:
+            if job is not None:
+                # Lock the row (FOR SHARE) so the job cannot change hands before the insert commits.
+                owned = (
+                    await session.execute(select(m.Investigation.id).where(owned_by(job)).with_for_update(read=True))
+                ).scalar_one_or_none()
+                if owned is None:
+                    raise JobLost(str(job.investigation_id))
             row = (
                 await session.execute(
                     insert(m.InvestigationEvent)

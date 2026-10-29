@@ -3,14 +3,16 @@ reject-with-hint resume (same thread), reviews of escalations, Investigate,
 Re-investigate (superseded), retries and failures."""
 
 import uuid
+from typing import Any
 
 import pytest
 
 from core.banking import BankingClient
 from core.enums import CaseStatus, InvestigationStatus, InvestigationTrigger, IssueType, RootCause, Verdict
 from core.jobs import ClaimedJob
-from investigation.schemas import FeedbackRequest
-from investigation.store import Conflict, NotFound
+from investigation.schemas import FeedbackRequest, InvestigationEvent
+from investigation.store import Conflict, JobLost, NotFound
+from investigation.store_memory import MemoryInvestigationStore
 from tests.banking_mock import ALICE
 from tests.fakes import FakeLLMProvider, text, tool_call
 from tests.investigation.harness import Harness, diagnosis, enough, make_harness, not_enough, triaged
@@ -76,12 +78,30 @@ async def test_accept_completes_resolves_and_finalizes(llm: FakeLLMProvider, ban
     assert state["values"]["final"]["root_cause"] == "card_frozen_by_customer"
     assert h.nodes(inv_id)[-1] == "finalize"
     types = h.event_types(inv_id)
-    assert types[types.index("review_recorded") + 1] == "status_changed"
+    assert types[types.index("review_recorded") :] == ["review_recorded", "step_started", "status_changed"]
     assert (str(inv_id), "diagnosis_accepted", 1.0, "accepted") in h.scores
 
     # Finalizing twice is harmless.
     await h.service.finalize(inv_id, result.resume_payload)
     assert h.nodes(inv_id).count("finalize") == 1
+
+
+async def test_finalize_after_accept_appends_nothing_after_completed(
+    llm: FakeLLMProvider, banking: BankingClient
+) -> None:
+    """`completed` closes the event streams: the finalize step is written with the
+    review, before it, and the resumed thread stores no events of its own."""
+    h = make_harness(llm, banking)
+    _, inv_id = await _diagnosed(h)
+    steps_used = h.store.investigations[inv_id].steps_used
+    result = await h.service.submit_feedback(inv_id, FeedbackRequest(verdict=Verdict.ACCEPTED))
+    before = [(e.type, e.payload) for e in h.events(inv_id)]
+    assert before[-2] == ("step_started", {"node": "finalize", "step": steps_used})
+    assert before[-1][0] == "status_changed" and before[-1][1]["status"] == "completed"
+
+    await h.service.finalize(inv_id, result.resume_payload)
+    assert (await _state(h, inv_id))["values"]["outcome"] == "finalized", "the thread still ran finalize"
+    assert [(e.type, e.payload) for e in h.events(inv_id)] == before
 
 
 async def test_correct_records_the_root_cause_and_resolves(llm: FakeLLMProvider, banking: BankingClient) -> None:
@@ -131,7 +151,7 @@ async def test_reject_with_hint_resumes_the_same_thread(llm: FakeLLMProvider, ba
 
     inv = h.store.investigations[inv_id]
     assert len([i for i in h.store.investigations.values() if i.case_id == case_id]) == 1, "same investigation"
-    assert inv.status == InvestigationStatus.AWAITING_REVIEW and inv.attempts == 2
+    assert inv.status == InvestigationStatus.AWAITING_REVIEW and inv.attempts == 1
     assert inv.diagnosis["id"] != first_diagnosis["id"]
     assert inv.diagnosis["evidence_ids"] == ["ev-1", "ev-2"]
     assert inv.review is None, "the rejected review survives in the event log only"
@@ -333,7 +353,7 @@ async def test_a_retry_after_reaching_review_does_not_reapply_the_review(
     job = await h.store.claim_next("w1")
     assert job is not None and job.resume_payload is not None
     _script_card_decline(llm)
-    config = h.service._config(inv_id, h.service._emitter(job, inv_id))
+    config = h.service._config(inv_id, h.service._emitter(job))
     from langgraph.types import Command
 
     await h.service.graph.ainvoke(Command(resume=job.resume_payload), config)  # ...then the worker dies
@@ -371,3 +391,112 @@ async def test_stale_jobs_are_recovered(llm: FakeLLMProvider, banking: BankingCl
     await h.service.recover_stale()
     assert row.status == InvestigationStatus.FAILED
     assert h.store.cases[case_id].status == CaseStatus.NEEDS_MANUAL
+
+
+async def test_rejects_do_not_use_up_the_retry_budget(llm: FakeLLMProvider, banking: BankingClient) -> None:
+    """Every review requeue starts a fresh run: after three rejections a single
+    transient failure is retried, not failed."""
+    h = make_harness(llm, banking, investigation_max_attempts=2)
+    case_id, inv_id = await _diagnosed(h)
+    for round_ in range(3):
+        await h.service.submit_feedback(inv_id, FeedbackRequest(verdict=Verdict.REJECTED, hint=f"again {round_}"))
+        assert h.store.investigations[inv_id].attempts == 0, "the review resets the attempts"
+        if round_ < 2:
+            _script_card_decline(llm)
+            assert await h.service.run_pending() == 1
+            assert h.store.investigations[inv_id].status == InvestigationStatus.AWAITING_REVIEW
+
+    # The third resume fails part-way (the model output runs out after the investigator).
+    llm.script("triage", triaged(IssueType.CARD_DECLINE))
+    llm.script("reasoning", tool_call("get_cards", {}), text("Card frozen (ev-1)."))
+    job = await h.store.claim_next("w1")
+    assert job is not None and job.attempts == 1
+    await h.service.handle_job(job)
+    inv = h.store.investigations[inv_id]
+    assert inv.status == InvestigationStatus.QUEUED and inv.error, "retried, not failed"
+    assert h.store.cases[case_id].status == CaseStatus.INVESTIGATING
+
+    llm.script(
+        "reasoning",
+        enough("ev-1"),
+        diagnosis(IssueType.CARD_DECLINE, RootCause.CARD_FROZEN_BY_CUSTOMER, "ev-1"),
+        text("Frozen."),
+    )
+    assert await h.service.run_pending() == 1
+    assert inv.status == InvestigationStatus.AWAITING_REVIEW and inv.attempts == 2
+    assert h.store.cases[case_id].status == CaseStatus.AWAITING_REVIEW
+
+
+class _TakenOverMidRun(MemoryInvestigationStore):
+    """Hands the job to worker `w2` just before the run's first `triage` event."""
+
+    async def append_event(
+        self, investigation_id: uuid.UUID, type: str, payload: dict[str, Any], *, job: ClaimedJob | None = None
+    ) -> InvestigationEvent:
+        if type == "step_started" and payload.get("node") == "triage":
+            self.investigations[investigation_id].worker_id = "w2"
+        return await super().append_event(investigation_id, type, payload, job=job)
+
+
+async def test_a_worker_that_lost_its_job_mid_run_appends_no_events(
+    llm: FakeLLMProvider, banking: BankingClient
+) -> None:
+    h = make_harness(llm, banking, store=_TakenOverMidRun())
+    case_id = h.store.add_case(customer_id=ALICE, complaint="card declined")
+    _script_card_decline(llm)
+    job = await h.store.claim_next("w1")
+    assert job is not None
+    await h.service.handle_job(job)
+
+    inv = h.only_investigation(case_id)
+    assert inv.status == InvestigationStatus.RUNNING and inv.worker_id == "w2", "w2's job is untouched"
+    assert h.nodes(inv.id) == ["intake"], "nothing after the takeover"
+    assert "token" not in h.event_types(inv.id)
+    assert len(llm.fake("triage").calls) == 0, "the run stopped at the first refused write"
+
+
+async def test_append_event_checks_ownership_only_for_worker_writes(
+    llm: FakeLLMProvider, banking: BankingClient
+) -> None:
+    h = make_harness(llm, banking)
+    h.store.add_case(customer_id=ALICE, complaint="card declined")
+    job = await h.store.claim_next("w1")
+    assert job is not None
+    await h.store.append_event(job.investigation_id, "token", {"text": "ok"}, job=job)
+    h.store.investigations[job.investigation_id].worker_id = "w2"
+    with pytest.raises(JobLost):
+        await h.store.append_event(job.investigation_id, "token", {"text": "late"}, job=job)
+    await h.store.append_event(job.investigation_id, "token", {"text": "api"})  # API-side: no owner
+    assert [e.payload["text"] for e in h.events(job.investigation_id)] == ["ok", "api"]
+
+
+def test_add_case_keeps_the_assistant_conversation_id() -> None:
+    """The no-database handoff passes the conversation the case came from: the case and
+    its transcript carry it, so the ops console can link back to the conversation."""
+    store = MemoryInvestigationStore()
+    conversation_id = uuid.uuid4()
+    case_id = store.add_case(
+        customer_id=ALICE,
+        conversation_id=conversation_id,
+        transcript=[("customer", "my card is declined"), ("assistant", "Passing this on.")],
+    )
+    assert store.cases[case_id].conversation_id == conversation_id
+    assert [m.conversation_id for m in store.messages] == [conversation_id, conversation_id]
+
+    without_transcript = store.add_case(customer_id=ALICE, conversation_id=conversation_id, enqueue=False)
+    assert store.cases[without_transcript].conversation_id == conversation_id
+
+    fallback = store.add_case(customer_id=ALICE, transcript=[("customer", "hi")], enqueue=False)
+    random_id = store.cases[fallback].conversation_id
+    assert random_id is not None and random_id != conversation_id
+
+
+async def test_case_detail_shows_the_handoff_conversation(llm: FakeLLMProvider, banking: BankingClient) -> None:
+    h = make_harness(llm, banking)
+    conversation_id = uuid.uuid4()
+    case_id = h.store.add_case(
+        customer_id=ALICE, conversation_id=conversation_id, transcript=[("customer", "declined")], enqueue=False
+    )
+    detail = await h.store.get_case_detail(case_id)
+    assert detail is not None and detail.conversation_id == conversation_id
+    assert [m.content for m in detail.transcript] == ["declined"]

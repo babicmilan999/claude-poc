@@ -13,7 +13,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from core.enums import EvidenceOrigin
-from core.masking import mask_data
+from core.masking import mask_data, mask_text
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -120,3 +120,56 @@ def evidence_lines(evidence: list[dict[str, Any]], *, with_data: bool = False, l
             line += "\n  data: " + (body if len(body) <= limit_chars else body[:limit_chars] + " …")
         lines.append(line)
     return "\n".join(lines) if lines else "- (no evidence)"
+
+
+class MaskedTokenStream:
+    """Masks streamed text that arrives in arbitrary chunks.
+
+    A card or account number can be split across chunks, so chunks are not masked one
+    by one. The raw text is buffered and only released up to the last *safe* whitespace
+    boundary: one no sensitive pattern can span, because the word before it has no
+    digit and the text after it starts with a lowercase letter or punctuation (patterns
+    start with a digit, `+` or an uppercase IBAN prefix). The released part is masked
+    with all the text before it as context, so the emitted text is always a prefix of
+    the masked whole. `flush()` releases the rest at the end of the stream.
+    """
+
+    def __init__(self) -> None:
+        self._raw = ""
+        self._sent = ""
+
+    def push(self, piece: str) -> str:
+        """Add a chunk; returns the masked text that is now safe to emit (maybe empty)."""
+        self._raw += piece
+        cut = self._safe_cut()
+        return self._release(mask_text(self._raw[:cut])) if cut else ""
+
+    def flush(self) -> str:
+        """End of stream: the masked rest of the text."""
+        return self._release(mask_text(self._raw))
+
+    def _release(self, masked: str) -> str:
+        if not masked.startswith(self._sent):  # never re-emit or rewrite emitted text
+            return ""
+        delta = masked[len(self._sent) :]
+        self._sent = masked
+        return delta
+
+    def _safe_cut(self) -> int:
+        raw = self._raw
+        for i in range(len(raw) - 2, -1, -1):
+            if not raw[i].isspace():
+                continue
+            after = raw[i + 1]
+            if after.isspace() or after.isdigit() or after.isupper() or after == "+":
+                continue
+            end = i
+            while end > 0 and raw[end - 1].isspace():
+                end -= 1
+            start = end
+            while start > 0 and not raw[start - 1].isspace():
+                start -= 1
+            if any(ch.isdigit() for ch in raw[start:end]):
+                continue
+            return i + 1
+        return 0
