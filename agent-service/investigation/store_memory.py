@@ -121,12 +121,13 @@ class MemoryInvestigationStore:
         self._message_ids = itertools.count(1)
         self._seq = itertools.count(1)
 
-    # --- test helpers (what the assistant's handoff writes in production) ----------------
+    # --- cases from other packages ---------------------------------------------------------
 
     def add_case(
         self,
         *,
         customer_id: str | uuid.UUID,
+        conversation_id: uuid.UUID | None = None,
         source: CaseSource = CaseSource.EMAIL,
         complaint: str | None = None,
         category: IssueType | None = None,
@@ -141,8 +142,17 @@ class MemoryInvestigationStore:
         enqueue: bool = True,
         trigger: InvestigationTrigger = InvestigationTrigger.AUTO,
     ) -> uuid.UUID:
+        """Insert a case (and, unless `enqueue=False`, queue its investigation); returns
+        the case id. Public: without a database the assistant's handoff calls it (then
+        `InvestigationService.publish_case_created`), and tests use it to seed cases.
+
+        `conversation_id` is the assistant conversation the case came from: it is stored
+        on the case (the ops console links to it) and on the `transcript` rows (`(role,
+        content)` pairs). Without one, a transcript gets a random conversation id. The
+        answer keys are stored for scoring only; the store never reads them back."""
         now = self._clock()
-        conversation_id = uuid.uuid4() if transcript else None
+        if conversation_id is None and transcript:
+            conversation_id = uuid.uuid4()
         case = _CaseRow(
             id=uuid.uuid4(),
             customer_id=uuid.UUID(str(customer_id)),
@@ -382,11 +392,15 @@ class MemoryInvestigationStore:
             row.status = InvestigationStatus.QUEUED.value
             row.resume_payload = payload
             row.worker_id = None
+            row.attempts = 0  # a review starts a new run with a fresh retry budget
             events.append(status_event(InvestigationStatus.QUEUED))
             transitions = self._set_case_status(row.case_id, CaseStatus.INVESTIGATING)
         else:
             row.status = InvestigationStatus.COMPLETED.value
             row.finished_at = self._clock()
+            # `finalize` runs after this, outside a worker: its step goes in before the
+            # status that closes the event streams.
+            events.append(("step_started", {"node": "finalize", "step": row.steps_used}))
             events.append(status_event(InvestigationStatus.COMPLETED))
             if feedback.corrected_issue_type is not None:
                 self.cases[row.case_id].category = feedback.corrected_issue_type.value
@@ -401,7 +415,11 @@ class MemoryInvestigationStore:
 
     # --- events -----------------------------------------------------------------------------
 
-    async def append_event(self, investigation_id: uuid.UUID, type: str, payload: dict[str, Any]) -> InvestigationEvent:
+    async def append_event(
+        self, investigation_id: uuid.UUID, type: str, payload: dict[str, Any], *, job: ClaimedJob | None = None
+    ) -> InvestigationEvent:
+        if job is not None:
+            self._owned(job)
         self._append(investigation_id, [(type, payload)])
         return self.events[-1]
 

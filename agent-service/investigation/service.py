@@ -9,7 +9,8 @@ job queue and the live streams.
 - `submit_feedback` records the review. Rejected: the same investigation is queued again
   with the review as its resume payload (same LangGraph thread). Accepted / corrected:
   the investigation completes and the case resolves at once; the paused thread is then
-  resumed to `finalize` (Langfuse scores) in the background.
+  resumed to `finalize` (Langfuse scores) in the background; its timeline step is
+  written with the review, so nothing is appended after the stream has closed.
 """
 
 import asyncio
@@ -145,7 +146,9 @@ class InvestigationService:
     async def finalize(self, investigation_id: uuid.UUID, resume_payload: dict[str, Any]) -> None:
         """Resume a reviewed (accepted / corrected) thread so it runs `finalize`. The
         outcome is already stored; this only completes the thread and scores it."""
-        config = self._config(investigation_id, self._emitter(None, investigation_id))
+        # The review already wrote this run's last events (`step_started finalize`, then
+        # `completed`, which closes the streams): nothing the resumed thread emits is stored.
+        config = self._config(investigation_id, _discard)
         try:
             snapshot = await self.graph.aget_state(config)
             if not snapshot.interrupts:
@@ -170,13 +173,17 @@ class InvestigationService:
 
     # --- running a job -----------------------------------------------------------------------
 
-    def _emitter(self, job: ClaimedJob | None, investigation_id: uuid.UUID) -> Emit:
+    def _emitter(self, job: ClaimedJob) -> Emit:
+        """Stores the run's events while `job` is still this worker's (`JobLost` stops a
+        run whose job was handed to another worker)."""
+        investigation_id = job.investigation_id
+
         async def sink(type_: str, payload: dict[str, Any]) -> None:
             masked = mask_data(payload)
-            if type_ == "classified" and job is not None:
+            if type_ == "classified":
                 transitions = await self.store.record_classification(job, IssueType(masked["issue_type"]))
                 self.publish_transitions(transitions)
-            await self.store.append_event(investigation_id, type_, masked)
+            await self.store.append_event(investigation_id, type_, masked, job=job)
             self.broker.publish_investigation(investigation_id)
 
         return sink
@@ -205,7 +212,7 @@ class InvestigationService:
 
     async def run_job(self, job: ClaimedJob) -> None:
         investigation_id = job.investigation_id
-        config = self._config(investigation_id, self._emitter(job, investigation_id))
+        config = self._config(investigation_id, self._emitter(job))
         transitions = await self.store.mark_started(job, [status_event(InvestigationStatus.RUNNING)])
         self.broker.publish_investigation(investigation_id)
         self.publish_transitions(transitions)
@@ -311,6 +318,10 @@ class InvestigationService:
             self.publish_transitions(await self.store.fail_cases(failed, "worker stopped responding; retries used up"))
             for investigation_id in failed:
                 self.broker.publish_investigation(investigation_id)
+
+
+async def _discard(type_: str, payload: dict[str, Any]) -> None:
+    return None
 
 
 def case_event_from_notification(payload: str) -> tuple[str | None, dict[str, Any] | None, str | None]:

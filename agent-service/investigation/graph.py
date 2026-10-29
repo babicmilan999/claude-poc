@@ -45,7 +45,13 @@ from core.tools import ops_tools_for
 from core.tools.common import Clock, utc_now
 from core.triage import triage as run_triage
 from investigation import prompts
-from investigation.common import emit, evidence_lines, normalise_handoff_evidence, step_started
+from investigation.common import (
+    MaskedTokenStream,
+    emit,
+    evidence_lines,
+    normalise_handoff_evidence,
+    step_started,
+)
 from investigation.investigator import build_investigator, findings_of
 from investigation.settings import InvestigationSettings
 from investigation.state import (
@@ -359,11 +365,15 @@ def build_graph(deps: GraphDeps, *, checkpointer: Checkpointer = None) -> Compil
             ),
         ]
         pieces: list[str] = []
+        tokens = MaskedTokenStream()  # a number split across chunks is still masked
         async for chunk in deps.llm.get(ModelAlias.REASONING).astream(explain, config):
             piece = chunk.content if isinstance(chunk.content, str) else ""
             if piece:
                 pieces.append(piece)
-                await emit(config, "token", {"text": mask_text(piece)})
+                if ready := tokens.push(piece):
+                    await emit(config, "token", {"text": ready})
+        if rest := tokens.flush():
+            await emit(config, "token", {"text": rest})
         explanation = mask_text("".join(pieces).strip()) or (
             f"Root cause {out.root_cause.value}, shown by {', '.join(cited)}."
         )
