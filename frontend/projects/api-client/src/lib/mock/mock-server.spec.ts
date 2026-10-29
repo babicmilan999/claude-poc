@@ -1,6 +1,7 @@
 import { firstValueFrom, take, toArray } from 'rxjs';
 import { ApiTransport, CustomerApi, OpsApi, SharedApi } from '../client';
 import { ApiError } from '../sse';
+import type { InvestigationEvent } from '../models';
 import { timelineFromEvents } from '../timeline-state';
 import { MockAgentServer } from './mock-server';
 import { seededRandom } from './testing';
@@ -192,6 +193,55 @@ describe('MockAgentServer (through the real client)', () => {
     expect(kase.active_investigation_id).toBeNull();
     await expect(ops.submitFeedback(id, { verdict: 'accepted' })).rejects.toMatchObject({ status: 409 });
     await expect(ops.investigateCase(daniel.id)).rejects.toMatchObject({ status: 409 });
+    await server.settle();
+  });
+
+  it('after a reject, a dropped timeline replaying the old awaiting_review reconnects with Last-Event-ID', async () => {
+    const server = new MockAgentServer({ tickMs: 0, random: seededRandom() });
+    const lastIds: (string | null)[] = [];
+    const fetchFn = (input: string, init?: RequestInit) => {
+      if (input.includes('/events')) lastIds.push(new Headers(init?.headers).get('Last-Event-ID'));
+      return server.fetch(input, init);
+    };
+    const ops = new OpsApi(new ApiTransport({ baseUrl: '', fetch: fetchFn, reconnectDelayMs: 0 }));
+    const [daniel] = (await ops.listCases()).items;
+    const id = daniel.active_investigation_id!;
+
+    // Round 2 starts and stays running until released.
+    const release = server.holdRuns();
+    await ops.submitFeedback(id, { verdict: 'rejected', hint: 'Check if the card was reported lost' });
+    const stored = await ops.getInvestigationEvents(id);
+    const round1Final = stored.findIndex((e) => e.type === 'awaiting_review');
+    expect(round1Final).toBeGreaterThan(-1);
+    expect(stored.slice(round1Final + 1).map((e) => e.type)).toEqual(['review_recorded', 'status_changed']);
+    lastIds.length = 0;
+
+    // Open the case from scratch: replays round 1 (with its final event), then round 2.
+    const seen: InvestigationEvent[] = [];
+    let replayed!: () => void;
+    const replayDone = new Promise<void>((resolve) => (replayed = resolve));
+    const all = new Promise<InvestigationEvent[]>((resolve, reject) =>
+      ops.streamInvestigationEvents(id).subscribe({
+        next: (e) => {
+          seen.push(e);
+          if (e.id === stored.at(-1)!.id) replayed();
+        },
+        error: reject,
+        complete: () => resolve(seen),
+      }),
+    );
+    await replayDone;
+    expect(server.dropStreams()).toBe(1);
+    // The client reconnects after the last event it saw, not "done".
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(lastIds).toEqual([null, String(stored.at(-1)!.id)]);
+
+    release();
+    const events = await all;
+    expect(events.at(-1)!.type).toBe('awaiting_review');
+    expect(events.filter((e) => e.type === 'awaiting_review').length).toBe(2);
+    expect(new Set(events.map((e) => e.id)).size).toBe(events.length);
+    expect((await ops.getInvestigation(id)).status).toBe('awaiting_review');
     await server.settle();
   });
 

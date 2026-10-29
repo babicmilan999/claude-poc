@@ -57,9 +57,9 @@ can point at another agent service without a rebuild:
 { "apiBaseUrl": "http://localhost:8000", "customerAppUrl": "http://localhost:4300" }
 ```
 
-`apiBaseUrl` (both apps), `apiMode` (`http` or `mock`) and `customerAppUrl` (ops console:
+`apiBaseUrl` (both apps), `apiMode` (`http` or `mock`; `real` is accepted as `http`) and `customerAppUrl` (ops console:
 watch-mode links) are optional; a missing file, a non-JSON answer or bad fields keep the
-values of `environment.real.ts`. An empty `apiBaseUrl` means same origin (a reverse proxy
+values of `environment.real.ts` (an unknown `apiMode` is ignored with a console warning). An empty `apiBaseUrl` means same origin (a reverse proxy
 in front of both). Mock builds never fetch it.
 
 ### Browser to agent service: CORS, no dev proxy
@@ -80,7 +80,7 @@ with nginx:
 | `API_MODE` (build arg) | build | `real` | `real` builds `--configuration real`; `mock` builds the in-browser mock |
 | `API_BASE_URL` (env) | container start | unset (`http://localhost:8000`) | agent service URL **as the browser sees it** |
 | `CUSTOMER_APP_URL` (env, ops console) | container start | unset (`http://localhost:4300`) | customer app URL for watch-mode links |
-| `API_MODE` (env) | container start | unset | override the mode (`http` or `mock`) |
+| `API_MODE` (env) | container start | unset | override the mode: `real` (or `http`) or `mock`, the same words as the build arg; `real` is written to `config.json` as `http`, an unknown value is skipped with a warning in the container log |
 
 `docker/write-config.sh` runs from nginx's `/docker-entrypoint.d/` and writes `config.json`
 from these variables; with none set it writes nothing. nginx answers `/config.json` with 404

@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import { endChatStream, EMPTY_CHAT } from './chat-state';
 import { applyRuntimeConfig, fetchRuntimeConfig, parseRuntimeConfig } from './runtime-config';
 import { sourceLink } from './source-link';
@@ -25,8 +26,17 @@ describe('runtime config', () => {
     expect(await fetchRuntimeConfig(respond(new TypeError('offline')))).toEqual({});
   });
 
-  it('drops fields with the wrong type or value', () => {
+  it('accepts real as an alias for http, like the Docker build arg', () => {
+    expect(parseRuntimeConfig({ apiMode: 'real' })).toEqual({ apiMode: 'http' });
+    expect(parseRuntimeConfig({ apiMode: ' Mock ' })).toEqual({ apiMode: 'mock' });
+  });
+
+  it('drops fields with the wrong type or value, warning about an unknown apiMode', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(parseRuntimeConfig({ apiMode: 'grpc', apiBaseUrl: 8000, customerAppUrl: ' ' })).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('grpc');
+    warn.mockRestore();
     expect(parseRuntimeConfig(null)).toEqual({});
     // An empty base URL is valid: same origin (behind a reverse proxy).
     expect(parseRuntimeConfig({ apiBaseUrl: '' })).toEqual({ apiBaseUrl: '' });

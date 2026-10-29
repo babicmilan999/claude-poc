@@ -7,7 +7,7 @@ import { FetchFn } from './sse';
  * optional; missing or invalid ones keep the build's value.
  */
 export interface RuntimeConfig {
-  /** `mock` or `http`. */
+  /** `mock` or `http` (`real`, the Docker build arg's name for it, is read as `http`). */
   apiMode?: 'mock' | 'http';
   /** Agent service base URL, e.g. `http://localhost:8000`, or `` for same origin. */
   apiBaseUrl?: string;
@@ -31,12 +31,20 @@ export async function fetchRuntimeConfig(fetchFn: FetchFn, url = 'config.json'):
   }
 }
 
-/** Keeps only the known fields with the right types. */
+/** `apiMode` spellings accepted in `config.json`; `real` matches the Docker build arg. */
+const API_MODES: Record<string, 'mock' | 'http'> = { mock: 'mock', http: 'http', real: 'http' };
+
+/** Keeps only the known fields with the right types; warns about an unknown `apiMode`. */
 export function parseRuntimeConfig(raw: unknown): RuntimeConfig {
   if (!raw || typeof raw !== 'object') return {};
   const input = raw as Record<string, unknown>;
   const out: RuntimeConfig = {};
-  if (input['apiMode'] === 'mock' || input['apiMode'] === 'http') out.apiMode = input['apiMode'];
+  const mode = input['apiMode'];
+  if (mode !== undefined) {
+    const key = typeof mode === 'string' ? mode.trim().toLowerCase() : '';
+    if (Object.prototype.hasOwnProperty.call(API_MODES, key)) out.apiMode = API_MODES[key];
+    else console.warn(`config.json: ignoring unknown apiMode ${JSON.stringify(mode)} (use http, real or mock)`);
+  }
   if (typeof input['apiBaseUrl'] === 'string') out.apiBaseUrl = input['apiBaseUrl'].trim();
   if (typeof input['customerAppUrl'] === 'string' && input['customerAppUrl'].trim()) {
     out.customerAppUrl = input['customerAppUrl'].trim();

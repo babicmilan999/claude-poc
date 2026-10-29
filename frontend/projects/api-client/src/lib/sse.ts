@@ -218,7 +218,8 @@ export interface ResumableSseOptions {
  * A resumable GET stream (the investigation timeline). Tracks the last `id:` seen; when
  * the connection drops or closes before a final message, reconnects with
  * `Last-Event-ID`, so the server replays only what was missed. Completes after the
- * server closes the stream following a final message. HTTP errors (4xx/5xx) are not
+ * server closes the stream right after a final message (a final message followed by
+ * non-final ones, as after a reject and re-run, does not count). HTTP errors (4xx/5xx) are not
  * retried, except 502/503/504 (a proxy in front of a restarting service).
  */
 export function resumableSse(fetchFn: FetchFn, url: string, options: ResumableSseOptions): Observable<SseMessage> {
@@ -268,7 +269,10 @@ export function resumableSse(fetchFn: FetchFn, url: string, options: ResumableSs
           receivedAny = true;
           if (msg.id !== undefined) lastEventId = msg.id;
           if (msg.retry !== undefined) retryDelay = msg.retry;
-          if (options.isFinal(msg)) sawFinal = true;
+          // Only the latest message decides: a final event replayed from an earlier
+          // round (e.g. `awaiting_review` before a reject) is followed by newer
+          // non-final events, and the stream must keep going after those.
+          sawFinal = options.isFinal(msg);
           subscriber.next(msg);
         },
         error: (err) => void onEnd(err),

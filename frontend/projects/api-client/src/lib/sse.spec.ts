@@ -106,6 +106,62 @@ describe('resumableSse', () => {
     expect(lastIds).toEqual([null, '2']);
   });
 
+  it('keeps reconnecting when a replayed final message is followed by newer events', async () => {
+    // A reject re-runs the investigation: round 1's final event stays in the timeline.
+    const encoder = new TextEncoder();
+    const dropping = (chunks: string[]) =>
+      new ReadableStream<Uint8Array>({
+        // Deliver each chunk, then fail the read after the last one (a dropped connection).
+        pull(controller) {
+          const chunk = chunks.shift();
+          if (chunk === undefined) controller.error(new TypeError('network error'));
+          else controller.enqueue(encoder.encode(chunk));
+        },
+      });
+    const lastIds: (string | null)[] = [];
+    const responses = [
+      () =>
+        dropping([
+          'id: 1\nevent: done\ndata: round1\n\n',
+          'id: 2\nevent: step\ndata: rejected\n\n',
+          'id: 3\nevent: step\ndata: running\n\n',
+        ]),
+      () => streamOf(['id: 4\nevent: step\ndata: more\n\n', 'id: 5\nevent: done\ndata: round2\n\n']),
+    ];
+    const fetchFn: FetchFn = async (_url, init) => {
+      lastIds.push(new Headers(init?.headers).get('Last-Event-ID'));
+      return new Response(responses.shift()!());
+    };
+    const msgs = await firstValueFrom(
+      resumableSse(fetchFn, '/events', { isFinal: (m) => m.event === 'done', retryDelayMs: 0 }).pipe(toArray()),
+    );
+    expect(msgs.map((m) => m.data)).toEqual(['round1', 'rejected', 'running', 'more', 'round2']);
+    expect(lastIds).toEqual([null, '3']);
+  });
+
+  it('asks hasStopped when the stream closes early after a replayed final message', async () => {
+    let asked = 0;
+    const responses = [
+      ['id: 1\nevent: done\ndata: round1\n\n', 'id: 2\nevent: step\ndata: rejected\n\n'],
+      ['id: 3\nevent: done\ndata: round2\n\n'],
+    ];
+    const lastIds: (string | null)[] = [];
+    const fetchFn: FetchFn = async (_url, init) => {
+      lastIds.push(new Headers(init?.headers).get('Last-Event-ID'));
+      return new Response(streamOf(responses.shift() ?? []));
+    };
+    const msgs = await firstValueFrom(
+      resumableSse(fetchFn, '/e', {
+        isFinal: (m) => m.event === 'done',
+        retryDelayMs: 0,
+        hasStopped: async () => (asked++, false),
+      }).pipe(toArray()),
+    );
+    expect(asked).toBe(1);
+    expect(lastIds).toEqual([null, '2']);
+    expect(msgs.map((m) => m.data)).toEqual(['round1', 'rejected', 'round2']);
+  });
+
   it('starts from the given lastEventId', async () => {
     let lastId: string | null = null;
     const fetchFn: FetchFn = async (_url, init) => {
