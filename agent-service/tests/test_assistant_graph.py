@@ -284,6 +284,54 @@ async def test_saying_it_did_not_help_twice_hands_off(h: Harness) -> None:
     await _handed_off(h, events, conversation.id, HandoffReason.REPEATED_FAILURE)
 
 
+async def test_still_declined_in_the_first_message_is_the_problem_not_a_failure(h: Harness) -> None:
+    """Words in the first message describe the problem: no answer has failed yet."""
+    conversation = await h.service.create_conversation(ALICE)
+    _script_card_answer(h)
+    events = await h.service.run_turn(conversation, "My card is still declined and still failing at Tesco")
+    assert types(events)[-1] == "message_completed"
+    assert (await h.state(conversation.id))["not_helpful_answers"] == []
+
+    # One "didn't help" about the answer: one failure, no handoff yet.
+    _script_card_answer(h)
+    events = await h.service.run_turn(conversation, "That didn't help, it's still declined")
+    assert types(events)[-1] == "message_completed" and h.store.cases == []
+
+
+async def test_did_not_help_before_any_answer_does_not_count(h: Harness) -> None:
+    conversation = await h.service.create_conversation(ALICE)
+    await h.service.run_turn(conversation, "hello")  # small talk is not an answer
+    _script_card_answer(h)
+    await h.service.run_turn(conversation, "That didn't help")
+    assert (await h.state(conversation.id))["not_helpful_answers"] == []
+
+    _script_card_answer(h)
+    events = await h.service.run_turn(conversation, "That didn't help, it's still declined")
+    assert types(events)[-1] == "message_completed"  # one failure (the last answer), not two
+    assert h.store.cases == []
+
+
+async def test_thumbs_down_and_did_not_help_about_one_answer_count_once(h: Harness) -> None:
+    conversation = await h.service.create_conversation(ALICE)
+    _script_card_answer(h)
+    events = await h.service.run_turn(conversation, "Why was my card declined at Tesco?")
+    first = events[-1]["message"]["id"]
+    await h.service.rate(conversation, first, Rating.DOWN)
+
+    _script_card_answer(h)
+    events = await h.service.run_turn(conversation, "That didn't help, it's still declined")
+    assert types(events)[-1] == "message_completed"  # 👎 + words about one answer: one failure
+    second = events[-1]["message"]["id"]
+    state = await h.state(conversation.id)
+    assert state["not_helpful_answers"] == [first] and state["down_rated"] == [first]
+
+    # The second answer did not help either: now two answers failed.
+    await h.service.rate(conversation, second, Rating.DOWN)
+    _script_handoff(h, IssueType.CARD_DECLINE)
+    events = await h.service.run_turn(conversation, "That didn't help either")
+    await _handed_off(h, events, conversation.id, HandoffReason.REPEATED_FAILURE)
+
+
 # --- the output guard ---------------------------------------------------------------------------
 
 
