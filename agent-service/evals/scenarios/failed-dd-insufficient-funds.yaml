@@ -1,0 +1,29 @@
+# Failed Direct Debit: not enough money when the collection was due.
+id: failed-dd-insufficient-funds
+title: Energy bill Direct Debit failed because of insufficient funds
+tags: [failed_direct_debit, self_serve]
+incident:
+  type: failed_direct_debit
+  root_cause: insufficient_funds
+  params:
+    originator: Northern Power
+complaint: >-
+  Northern Power says my direct debit failed. Why was it not paid?
+persona:
+  vagueness: medium
+  patience: medium
+  tone: worried
+  phrasing:
+    - "my direct debit bounced"
+    - "my bill wasn't paid"
+  knows:
+    - Northern Power says the direct debit failed
+    - they spent quite a lot this week (flights and a new laptop)
+  max_turns: 6
+conversation_script:
+  - Northern Power says my direct debit bounced. Why?
+  - What should I do so it gets paid?
+expected:
+  issue_type: failed_direct_debit
+  root_cause: insufficient_funds
+  outcome: self_serve

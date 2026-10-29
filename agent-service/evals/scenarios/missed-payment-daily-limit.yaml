@@ -1,0 +1,32 @@
+# Missed payment: an earlier transfer used up the daily payment limit.
+id: missed-payment-daily-limit
+title: Rent standing order failed because the daily payment limit was reached
+tags: [missed_payment, self_serve]
+incident:
+  type: missed_payment
+  root_cause: daily_payment_limit_exceeded
+  params:
+    payee_name: Oakwood Lettings
+complaint: >-
+  My rent standing order to Oakwood Lettings did not go out today. I moved
+  some money to savings this morning. Why did the rent fail?
+persona:
+  vagueness: medium
+  patience: medium
+  tone: frustrated
+  phrasing:
+    - "my rent payment didn't happen"
+    - "the standing order failed"
+  knows:
+    - the rent to Oakwood Lettings did not go out today
+    - the standing order normally works
+    - they moved some money to savings early this morning
+    - they changed some security settings in the app a couple of weeks ago
+  max_turns: 6
+conversation_script:
+  - My rent standing order failed today. Why?
+  - I did move money to savings this morning. Is that the problem?
+expected:
+  issue_type: missed_payment
+  root_cause: daily_payment_limit_exceeded
+  outcome: self_serve

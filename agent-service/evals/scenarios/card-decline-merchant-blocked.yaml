@@ -1,0 +1,31 @@
+# Card decline: the customer blocked this merchant category in their card controls.
+id: card-decline-merchant-blocked
+title: Online payment refused because the merchant category is blocked
+tags: [card_decline, self_serve]
+incident:
+  type: card_decline
+  root_cause: merchant_category_blocked
+  params:
+    merchant_name: LuckyStar Bets
+complaint: >-
+  My card was refused by LuckyStar Bets online, but other websites work. What
+  is wrong with my card?
+persona:
+  vagueness: medium
+  patience: medium
+  tone: puzzled
+  phrasing:
+    - "a website won't take my card"
+    - "my online payment was refused"
+  knows:
+    - they tried to pay LuckyStar Bets online and it was declined
+    - other online shopping works
+    - they set up some spending controls in the app some time ago
+  max_turns: 6
+conversation_script:
+  - A website won't take my card, LuckyStar Bets. Other sites are fine.
+  - How do I undo that?
+expected:
+  issue_type: card_decline
+  root_cause: merchant_category_blocked
+  outcome: self_serve

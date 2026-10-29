@@ -1,0 +1,31 @@
+# Missed payment: the payee's account is closed. The customer needs a person: hand off.
+id: missed-payment-payee-closed
+title: Rent standing order failed because the payee account is closed
+tags: [missed_payment, needs_human]
+incident:
+  type: missed_payment
+  root_cause: payee_account_closed
+  params:
+    payee_name: Oakwood Lettings
+complaint: >-
+  My rent to Oakwood Lettings did not arrive but the money is still in my
+  account. What happened?
+persona:
+  vagueness: medium
+  patience: low
+  tone: frustrated
+  phrasing:
+    - "my rent payment failed"
+    - "the money never reached my landlord"
+  knows:
+    - Oakwood Lettings says the rent did not arrive
+    - the standing order has worked for months
+    - the money is still in their account
+  max_turns: 6
+conversation_script:
+  - My rent to Oakwood Lettings never arrived but the money is still in my account.
+  - So what do I do now?
+expected:
+  issue_type: missed_payment
+  root_cause: payee_account_closed
+  outcome: needs_human

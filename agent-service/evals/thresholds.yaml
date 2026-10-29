@@ -1,0 +1,15 @@
+# Eval gate (architecture section 10): the minimum average per score over a run.
+# `make eval` fails when any average is below its threshold. A score that no item
+# produced in a run (for example diagnosis_correct with --modes assistant) is reported
+# as not measured. Tracked numbers (steps_used, category_changed, seconds) are never gated.
+#
+# Starting values for the first runs on the `ollama` profile; raise them to the measured
+# baseline (minus the agreed margin) once `anthropic` and `mixed` have been measured.
+thresholds:
+  item_ok: 1.0                     # every item ran without an error
+  handoff_correct: 0.8             # handed off when needs_human, kept when self_serve
+  containment: 0.6                 # self_serve journeys ended resolved
+  assistant_category_correct: 0.8  # the assistant's triage category
+  copilot_category_correct: 0.8    # the copilot's final issue type
+  diagnosis_correct: 0.7           # (issue type, root cause) of the diagnosis
+  groundedness: 0.8                # LLM judge: share of claims backed by a source

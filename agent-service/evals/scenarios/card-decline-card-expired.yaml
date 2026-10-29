@@ -1,0 +1,31 @@
+# Card decline: the card is past its expiry date (a replacement letter is unopened).
+id: card-decline-card-expired
+title: Card declined because it has expired
+tags: [card_decline, self_serve]
+incident:
+  type: card_decline
+  root_cause: card_expired
+  params:
+    merchant_name: Sainsbury's
+complaint: >-
+  My card suddenly stopped working at Sainsbury's. It worked fine last month.
+  Please help.
+persona:
+  vagueness: high
+  patience: medium
+  tone: confused
+  phrasing:
+    - "my card stopped working"
+    - "the card machine said declined"
+  knows:
+    - the card was declined at Sainsbury's today
+    - the same card worked fine last month
+    - a letter from the bank arrived a few weeks ago but they have not opened it
+  max_turns: 6
+conversation_script:
+  - My card stopped working at Sainsbury's today. It worked last month.
+  - What do I need to do to get it working again?
+expected:
+  issue_type: card_decline
+  root_cause: card_expired
+  outcome: self_serve

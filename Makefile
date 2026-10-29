@@ -6,7 +6,7 @@ INFRA_SERVICES ?= postgres litellm langfuse-web langfuse-worker
 REDOCLY := npx --yes @redocly/cli@1.34.3
 AJV := npx --yes ajv-cli@5.0.0
 
-.PHONY: help test test-agent test-banking test-frontend lint-contracts bundle-contracts up down infra models
+.PHONY: help test test-agent test-banking test-frontend lint-contracts bundle-contracts up down infra models eval
 
 help:
 	@echo "make test            run every app's tests"
@@ -18,6 +18,7 @@ help:
 	@echo "make up / down       start / stop the full stack in Docker Compose"
 	@echo "make infra           start only Postgres, LiteLLM and Langfuse"
 	@echo "make models          pull the Ollama models of LLM_PROFILE (env or .env)"
+	@echo "make eval            run the eval scenarios and gate (needs the stack; PROFILE=mixed picks a profile)"
 
 test: test-agent test-banking test-frontend
 
@@ -61,3 +62,7 @@ infra:
 models:
 	@if [ -x infra/scripts/pull-models.sh ]; then infra/scripts/pull-models.sh "$${LLM_PROFILE:-}"; \
 	else echo "models: skipped (infra/scripts/pull-models.sh not written yet)"; fi
+
+# Needs the stack running (banking-service with the simulation profile, LiteLLM; Langfuse optional).
+eval:
+	cd agent-service && LLM_PROFILE=$${PROFILE:-$${LLM_PROFILE:-ollama}} uv run pytest -m eval tests/evals -s

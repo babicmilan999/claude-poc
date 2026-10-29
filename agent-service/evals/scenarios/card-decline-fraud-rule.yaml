@@ -1,0 +1,31 @@
+# Card decline: a fraud rule blocked the card. Only the ops team can lift it: hand off.
+id: card-decline-fraud-rule
+title: Card blocked by a fraud rule after an online purchase
+tags: [card_decline, needs_human]
+incident:
+  type: card_decline
+  root_cause: fraud_rule_triggered
+  params:
+    merchant_name: CoinVault Exchange
+complaint: >-
+  My card was declined online and now it does not work anywhere, not even at
+  the supermarket. I need it working today.
+persona:
+  vagueness: low
+  patience: low
+  tone: anxious
+  phrasing:
+    - "my card doesn't work anywhere"
+    - "my card has been stopped"
+  knows:
+    - they tried to pay CoinVault Exchange online today and it was declined
+    - later the card was declined at the supermarket too
+    - they did not get any message from the bank
+  max_turns: 6
+conversation_script:
+  - My card was declined online at CoinVault Exchange and now it doesn't work anywhere.
+  - I need it working today, what can you do?
+expected:
+  issue_type: card_decline
+  root_cause: fraud_rule_triggered
+  outcome: needs_human

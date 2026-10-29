@@ -1,0 +1,31 @@
+# Card decline: a tap payment above the customer's own contactless limit.
+id: card-decline-contactless-limit
+title: Contactless payment declined above the contactless limit
+tags: [card_decline, self_serve]
+incident:
+  type: card_decline
+  root_cause: contactless_limit_exceeded
+  params:
+    merchant_name: The Kings Arms
+complaint: >-
+  I tried to pay by tapping my card at The Kings Arms and it was declined.
+  Other payments this week worked. Why?
+persona:
+  vagueness: medium
+  patience: high
+  tone: polite
+  phrasing:
+    - "tapping my card didn't work"
+    - "my card was declined when I tapped it"
+  knows:
+    - they tapped the card at The Kings Arms and it was declined
+    - other card payments this week worked
+    - they changed some card settings in the app a while ago
+  max_turns: 6
+conversation_script:
+  - I tapped my card at The Kings Arms and it was declined. Other payments work fine.
+  - Can I change that myself?
+expected:
+  issue_type: card_decline
+  root_cause: contactless_limit_exceeded
+  outcome: self_serve
