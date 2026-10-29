@@ -1,0 +1,32 @@
+# Failed Direct Debit: the originator's side closed the account the collection belongs
+# to (see "Open questions" in docs/implementation-plan.md). Needs a person: hand off.
+id: failed-dd-account-closed-by-originator
+title: Broadband Direct Debit failed because the originator closed the account
+tags: [failed_direct_debit, needs_human]
+incident:
+  type: failed_direct_debit
+  root_cause: account_closed_by_originator
+  params:
+    originator: Brightline Broadband
+complaint: >-
+  I got an email from Brightline Broadband saying my direct debit failed, but
+  I never cancelled it. Can you find out what happened?
+persona:
+  vagueness: medium
+  patience: medium
+  tone: confused
+  phrasing:
+    - "my direct debit failed"
+    - "a payment I didn't cancel stopped"
+  knows:
+    - Brightline Broadband emailed that the direct debit failed
+    - they did not cancel anything
+    - they recently moved house and updated their details with Brightline Broadband
+  max_turns: 6
+conversation_script:
+  - Brightline Broadband says my direct debit failed but I never cancelled it.
+  - Can you find out what happened?
+expected:
+  issue_type: failed_direct_debit
+  root_cause: account_closed_by_originator
+  outcome: needs_human

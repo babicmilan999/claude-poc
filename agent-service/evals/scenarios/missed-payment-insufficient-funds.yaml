@@ -1,0 +1,31 @@
+# Missed payment: the standing order failed on its run date for lack of funds.
+id: missed-payment-insufficient-funds
+title: Rent standing order failed because of insufficient funds on the run date
+tags: [missed_payment, self_serve]
+incident:
+  type: missed_payment
+  root_cause: insufficient_funds
+  params:
+    payee_name: Oakwood Lettings
+complaint: >-
+  My landlord says my rent did not arrive this month. It is a standing order
+  and it always works. Please check.
+persona:
+  vagueness: medium
+  patience: medium
+  tone: worried
+  phrasing:
+    - "my rent didn't go out"
+    - "my standing order didn't pay"
+  knows:
+    - Oakwood Lettings says this month's rent has not arrived
+    - it is a standing order that has worked for months
+    - they spent more than usual this month (flights and a new laptop)
+  max_turns: 6
+conversation_script:
+  - My standing order for rent to Oakwood Lettings didn't pay this month. Why?
+  - Will it try again or do I need to pay it myself?
+expected:
+  issue_type: missed_payment
+  root_cause: insufficient_funds
+  outcome: self_serve

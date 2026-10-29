@@ -1,0 +1,31 @@
+# Card decline: not enough money in the account for the payment.
+id: card-decline-insufficient-funds
+title: Card declined because the balance was too low
+tags: [card_decline, self_serve]
+incident:
+  type: card_decline
+  root_cause: insufficient_funds
+  params:
+    merchant_name: Currys
+complaint: >-
+  My card was declined at Currys today. Can you tell me why? I thought I had
+  enough money.
+persona:
+  vagueness: medium
+  patience: medium
+  tone: embarrassed
+  phrasing:
+    - "my card got declined"
+    - "why won't my card work?"
+  knows:
+    - the card was declined at Currys today
+    - they thought they had enough money but do not know the exact balance
+    - payday is next week
+  max_turns: 6
+conversation_script:
+  - My card got declined at Currys today, why?
+  - Oh. How much do I actually have available?
+expected:
+  issue_type: card_decline
+  root_cause: insufficient_funds
+  outcome: self_serve
